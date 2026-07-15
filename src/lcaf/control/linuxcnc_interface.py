@@ -36,6 +36,8 @@ LinuxCNCInterface
       ├── linuxcnc.error_channel()
       └── HAL
 
+Author: Mason Paprzycki 
+Version: 0.1
 ===============================================================================
 """
 

@@ -2,32 +2,10 @@
 ===============================================================================
 ForgeBrain
 -------------------------------------------------------------------------------
-
-High-Level Autonomous Forging Controller
+Highest level abstraction for the forging brain.
 
 Author: Mason Paprzycki 
 Version: 0.1
-
-Overview
---------
-
-ForgeBrain is the supervisory controller for the autonomous forging cell.
-
-LinuxCNC performs deterministic realtime motion.
-
-ForgeBrain performs:
-
-    • Toolpath execution
-    • Motion coordination
-    • Process control
-    • State management
-    • Fault handling
-    • Sensor coordination
-    • Telemetry
-    • Manufacturing decisions
-
-ForgeBrain NEVER performs realtime servo control.
-
 ===============================================================================
 """
 

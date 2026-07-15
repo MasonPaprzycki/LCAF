@@ -17,6 +17,8 @@ ForgeBrain never talks directly to HAL.
 
 Everything goes through Motor.
 
+Author: Mason Paprzycki 
+Version: 0.1
 ===============================================================================
 """
 
