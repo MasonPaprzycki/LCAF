@@ -4,10 +4,6 @@
 
 The Low Cost Agility Forge (LCAF) control software is implemented as a **Hierarchical Finite State Machine (HFSM)**.
 
-Unlike a traditional flat finite state machine, only **ForgeBrain** owns execution.
-
-Every other component in the software stack exists only because ForgeBrain delegates work to it during each heartbeat.
-
 The hierarchy is
 
 ```
@@ -29,11 +25,9 @@ ForgeBrain
     └── LinuxCNC Interface
 ```
 
-Only ForgeBrain owns execution timing.
+**ForgeBrain** controls when and how commands are executed thorugh the subsystem.  
 
-No subsystem executes independently.
-
-No module owns its own execution loop.
+No subsystem executes independently. And no module has its own execution loop.
 
 Every module is updated once every heartbeat.
 
@@ -75,12 +69,9 @@ Publish Telemetry
 Repeat
 ```
 
-Every subsystem reads the same LinuxCNC snapshot.
-
-This guarantees deterministic behaviour across the entire controller.
+Every subsystem reads the same LinuxCNC snapshot guaranteeing deterministic behavior across the entire controller.
 
 ---
-
 # Hierarchical State Machine
 
 The complete controller hierarchy is shown below.
@@ -103,37 +94,33 @@ EXECUTE_OPERATION
 │
 ├─────────────────────────────────────────────────────────────────────────────┐
 │                                                                             │
-│                      Motion Coordinator                                     │
+│                           Motion Coordinator                                │
 │                                                                             │
-│        Determines the required machine motion for the current operation.    │
-│                                                                             │
+│      Executes every manufacturing operation using a deterministic           │
+│      safe-motion sequence.                                                  │
 │                                                                             │
 │     ┌──────────────────────────────────────────────────────────────┐        │
 │     │                                                              │        │
 │     ▼                                                              ▼        │
-│  Translate XY                                               Rotate A         │
+│  Retract Z                                                  Verify Z Safe    │
 │     │                                                              │        │
 │     ▼                                                              ▼        │
-│  Verify XY                                                Verify Rotation    │
+│  Retract X/Y                                                Verify X/Y Safe  │
 │     │                                                              │        │
-│     └──────────────────────┬───────────────────────────────────────┘        │
-│                            ▼                                                │
-│                        Execute Strike                                       │
-│                            │                                                │
-│                            ▼                                                │
-│                        Verify Strike                                        │
-│                            │                                                │
-│                            ▼                                                │
-│                         Retract Z                                           │
-│                            │                                                │
-│                            ▼                                                │
-│                       Verify Retraction                                     │
-│                            │                                                │
-│                            ▼                                                │
-│                        Motion Complete                                      │
+│     ▼                                                              ▼        │
+│  Rotate A                                                   Verify Rotation  │
+│     │                                                              │        │
+│     ▼                                                              ▼        │
+│  Move X/Y                                                   Verify X/Y       │
+│     │                                                              │        │
+│     ▼                                                              ▼        │
+│  Move Z                                                     Verify Z         │
+│     │                                                              │        │
+│     └──────────────────────────────┬───────────────────────────────┘        │
+│                                    ▼                                        │
+│                              Motion Complete                                │
 │                                                                             │
-│                                                                             │
-│        Every motion request is delegated to one or more Motor objects.      │
+│      Every motion request is delegated to one or more Motor objects.        │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 │
@@ -233,6 +220,7 @@ Load the next JSONL operation.
 Responsibilities
 
 - Read Toolpath Queue
+- Decode target X, Y, Z, and A positions
 - Store current operation
 - Increment execution pointer
 - Verify operation exists
@@ -261,7 +249,8 @@ Current Responsibilities
 
 - Decode JSON operation
 - Select operation type
-- Prepare motion sequence
+- Validate target coordinates
+- Prepare the standard motion sequence
 
 Future Responsibilities
 
@@ -325,14 +314,14 @@ Servo Drive
 Motor
 ```
 
-The nested motion state machine executes as follows.
+Every manufacturing operation follows the same deterministic safe-motion sequence.
 
 ```
 START
 
 ↓
 
-Move XY
+Retract Z
 
 ↓
 
@@ -340,7 +329,19 @@ Wait for LinuxCNC
 
 ↓
 
-Verify XY
+Verify Z Safe
+
+↓
+
+Retract X/Y
+
+↓
+
+Wait for LinuxCNC
+
+↓
+
+Verify X/Y Safe
 
 ↓
 
@@ -356,7 +357,7 @@ Verify Rotation
 
 ↓
 
-Execute Strike
+Move X/Y
 
 ↓
 
@@ -364,11 +365,11 @@ Wait for LinuxCNC
 
 ↓
 
-Verify Strike
+Verify X/Y
 
 ↓
 
-Retract Z
+Move Z
 
 ↓
 
@@ -376,7 +377,7 @@ Wait for LinuxCNC
 
 ↓
 
-Verify Retraction
+Verify Z
 
 ↓
 
@@ -693,4 +694,18 @@ Every command originates in ForgeBrain.
 
 Every subsystem is synchronized by the same heartbeat.
 
-This architecture guarantees deterministic execution, simplifies debugging, and provides a stable foundation for future sensor integration, adaptive process control, digital twins, FEM/MPM simulation, and autonomous forging algorithms without modifying the underlying machine control architecture.
+The Motion Coordinator is responsible for expanding every toolpath operation into the same deterministic safe-motion sequence:
+
+```
+Retract Z
+↓
+Retract X/Y
+↓
+Rotate A
+↓
+Move X/Y
+↓
+Move Z
+```
+
+Only the target coordinates differ between operations; the execution sequence is invariant. This architecture guarantees deterministic execution, simplifies debugging, and provides a stable foundation for future sensor integration, adaptive process control, digital twins, FEM/MPM simulation, and autonomous forging algorithms without modifying the underlying machine control architecture.
