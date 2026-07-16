@@ -46,11 +46,7 @@ Update LinuxCNC
 
 ↓
 
-Update Motion Coordinator
-
-↓
-
-Update Motor States
+Update Motor States   
 
 ↓
 
@@ -58,11 +54,27 @@ Update Sensor States
 
 ↓
 
+Update Motion Coordinator
+
+↓
+
 Update ForgeBrain State Machine
 
 ↓
 
+Generate commands 
+
+↓
+
+Send commands down hiearchy 
+
+↓
+
 Publish Telemetry
+
+↓
+
+Heartbeat end
 
 ↓
 
@@ -157,7 +169,7 @@ SHUTDOWN
 
 ---
 
-# ForgeBrain State Definitions
+# ForgeBrain State Machine
 
 ## INITIALIZING
 
@@ -522,6 +534,387 @@ FAULT → SHUTDOWN
 Purpose
 
 Terminate the ForgeBrain execution loop.
+
+---
+
+# Motion Coordinator State Machine
+
+The Motion Coordinator is responsible for expanding a manufacturing operation into a deterministic machine motion sequence.
+
+ForgeBrain provides the desired manufacturing operation.
+
+The Motion Coordinator converts that operation into a sequence of axis commands.
+
+The Motion Coordinator does not perform trajectory generation.
+
+All trajectory planning, interpolation, acceleration, and servo control remain the responsibility of LinuxCNC.
+
+Each motion state represents a required stage of the machine positioning sequence.
+
+```
+                         IDLE
+                           │
+                           ▼
+                    RETRACT_Z
+                           │
+                           ▼
+                 VERIFY_Z_RETRACTED
+                           │
+                           ▼
+                  RETRACT_XY
+                           │
+                           ▼
+                VERIFY_XY_RETRACTED
+                           │
+                           ▼
+                    ROTATE_A
+                           │
+                           ▼
+                VERIFY_ROTATION
+                           │
+                           ▼
+                    MOVE_XY
+                           │
+                           ▼
+                 VERIFY_XY_POSITION
+                           │
+                           ▼
+                     MOVE_Z
+                           │
+                           ▼
+                  VERIFY_Z_POSITION
+                           │
+                           ▼
+                     COMPLETE
+
+
+Any State
+
+↓
+
+FAULT
+
+↓
+
+IDLE
+```
+
+---
+
+## State Definitions
+
+### IDLE
+
+Purpose
+
+Wait for a new motion request from ForgeBrain.
+
+Responsibilities
+
+- Maintain current axis state
+- Monitor LinuxCNC status
+- Await operation command
+
+Transition
+
+```
+IDLE → RETRACT_Z
+```
+
+---
+
+### RETRACT_Z
+
+Purpose
+
+Move the Z axis to a known safe clearance height before any lateral or rotational movement.
+
+Responsibilities
+
+- Command Z axis retraction through LinuxCNC
+- Monitor motion status
+
+Transition
+
+```
+RETRACT_Z → VERIFY_Z_RETRACTED
+```
+
+---
+
+### VERIFY_Z_RETRACTED
+
+Purpose
+
+Confirm the Z axis has reached the safe clearance position.
+
+Responsibilities
+
+- Verify LinuxCNC motion completion
+- Verify commanded position achieved
+
+Transition
+
+```
+VERIFY_Z_RETRACTED → RETRACT_XY
+```
+
+or
+
+```
+VERIFY_Z_RETRACTED → FAULT
+```
+
+---
+
+### RETRACT_XY
+
+Purpose
+
+Move X and Y axes to their safe clearance positions.
+
+Responsibilities
+
+- Command X/Y retraction through LinuxCNC
+- Monitor motion status
+
+Transition
+
+```
+RETRACT_XY → VERIFY_XY_RETRACTED
+```
+
+---
+
+### VERIFY_XY_RETRACTED
+
+Purpose
+
+Confirm X/Y axes have reached the safe position.
+
+Responsibilities
+
+- Verify LinuxCNC motion completion
+- Verify commanded position achieved
+
+Transition
+
+```
+VERIFY_XY_RETRACTED → ROTATE_A
+```
+
+or
+
+```
+VERIFY_XY_RETRACTED → FAULT
+```
+
+---
+
+### ROTATE_A
+
+Purpose
+
+Rotate the workpiece to the required orientation.
+
+The A axis is purely rotational and does not require positional clearance beyond the previous retract states.
+
+Responsibilities
+
+- Command rotary position through LinuxCNC
+- Monitor motion status
+
+Transition
+
+```
+ROTATE_A → VERIFY_ROTATION
+```
+
+---
+
+### VERIFY_ROTATION
+
+Purpose
+
+Confirm the A axis has reached the commanded orientation.
+
+Responsibilities
+
+- Verify LinuxCNC motion completion
+- Verify rotary position
+
+Transition
+
+```
+VERIFY_ROTATION → MOVE_XY
+```
+
+or
+
+```
+VERIFY_ROTATION → FAULT
+```
+
+---
+
+### MOVE_XY
+
+Purpose
+
+Move the tool to the required forging location.
+
+Responsibilities
+
+- Command X/Y position through LinuxCNC
+- Monitor motion status
+
+Transition
+
+```
+MOVE_XY → VERIFY_XY_POSITION
+```
+
+---
+
+### VERIFY_XY_POSITION
+
+Purpose
+
+Confirm the X/Y axes have reached the commanded position.
+
+Responsibilities
+
+- Verify LinuxCNC motion completion
+- Verify commanded position achieved
+
+Transition
+
+```
+VERIFY_XY_POSITION → MOVE_Z
+```
+
+or
+
+```
+VERIFY_XY_POSITION → FAULT
+```
+
+---
+
+### MOVE_Z
+
+Purpose
+
+Move the forging tool into the commanded Z position.
+
+This represents the final approach into the forging operation.
+
+Responsibilities
+
+- Command Z position through LinuxCNC
+- Monitor motion status
+
+Transition
+
+```
+MOVE_Z → VERIFY_Z_POSITION
+```
+
+---
+
+### VERIFY_Z_POSITION
+
+Purpose
+
+Confirm the forging position has been reached.
+
+Responsibilities
+
+- Verify LinuxCNC motion completion
+- Verify commanded Z position achieved
+
+Transition
+
+```
+VERIFY_Z_POSITION → COMPLETE
+```
+
+or
+
+```
+VERIFY_Z_POSITION → FAULT
+```
+
+---
+
+### COMPLETE
+
+Purpose
+
+Report successful completion of the current motion sequence.
+
+Responsibilities
+
+- Notify ForgeBrain motion has completed
+- Return Motion Coordinator to idle
+
+Transition
+
+```
+COMPLETE → IDLE
+```
+
+---
+
+### FAULT
+
+Purpose
+
+Handle motion failures.
+
+Possible causes include
+
+- LinuxCNC motion fault
+- Axis fault
+- Following error
+- Communication failure
+- Invalid motion request
+
+Responsibilities
+
+- Stop current motion sequence
+- Report fault condition upward
+- Preserve diagnostic information
+
+Transition
+
+```
+FAULT → IDLE
+```
+
+after fault recovery has been handled by the higher-level controller.
+
+---
+
+The Motion Coordinator owns motion sequencing only.
+
+It does not control individual motors directly, generate trajectories, or bypass LinuxCNC.
+
+Its responsibility is to guarantee that every manufacturing operation follows the required safe sequence:
+
+```
+Retract Z
+↓
+Retract X/Y
+↓
+Rotate A
+↓
+Move X/Y
+↓
+Move Z
+```
+
+while delegating all actual motion execution to LinuxCNC.
 
 ---
 # Motor State Machine
