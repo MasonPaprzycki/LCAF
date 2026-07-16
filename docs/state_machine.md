@@ -524,85 +524,225 @@ Purpose
 Terminate the ForgeBrain execution loop.
 
 ---
-
-# Nested Motor State Machine
+# Motor State Machine
 
 Every machine axis owns an independent Motor object.
 
 The Motor class is **not** an independent controller.
 
-It only exists because ForgeBrain delegated motion to the Motion Coordinator.
+It exists solely as an abstraction of a single machine axis and executes commands delegated by the Motion Coordinator.
 
-Each Motor maintains its own state.
-
-```
-UNKNOWN
-
-↓
-
-DISABLED
-
-↓
-
-READY
-
-↓
-
-MOVING
-
-↓
-
-LinuxCNC Executing Motion
-
-↓
-
-Poll LinuxCNC
-
-↓
-
-Motion Complete?
-
-├─────────────── No ───────────────┐
-│                                  │
-▼                                  │
-MOVING                             │
-│                                  │
-└──────────────────────────────────┘
-
-Yes
-
-↓
-
-COMPLETE
-
-↓
-
-READY
-```
-
-Exceptional transitions
+Each Motor maintains its own operational state.
 
 ```
-Any State
+                     UNINITIALIZED
+                           │
+                           ▼
+                      DISABLED
+                           │
+                    Enable Axis
+                           │
+                           ▼
+                        ENABLED
+                     ┌─────┴─────┐
+                     │           │
+                     ▼           ▼
+          CONSTANT VELOCITY   POSITION MOTION
+             (Homing)          (Toolpath Move)
+                     │           │
+                     └─────┬─────┘
+                           │
+                 Motion Complete
+                           │
+                           ▼
+                        ENABLED
 
-↓
 
-ESTOP
+Any Operational State
+
+        │
+
+        ▼
+
+      FAULT
+
+        │
+
+   Fault Recovery
+
+        │
+
+        ▼
+
+    DISABLED
+```
+
+## State Definitions
+
+### UNINITIALIZED
+
+The Motor object has been created but has not yet established communication with LinuxCNC.
+
+Responsibilities
+
+- No motion permitted
+- Await initialization
+- Verify communication with LinuxCNC
+
+Transition
+
+```
+UNINITIALIZED → DISABLED
+```
+
+---
+
+### DISABLED
+
+The axis is intentionally disabled and available for future activation.
+
+This is the normal safe state of an axis.
+
+Responsibilities
+
+- Reject motion commands
+- Report disabled status
+- Await enable request
+- Maintain fault-free state
+
+Transition
+
+```
+DISABLED → ENABLED
 ```
 
 or
 
 ```
-Any State
-
-↓
-
-FAULT
+DISABLED → FAULT
 ```
 
-Motor state transitions are driven entirely from LinuxCNC status.
+---
 
-The Motor class never generates trajectories and never performs real-time control.
+### ENABLED
+
+The axis is enabled and capable of accepting motion commands.
+
+Responsibilities
+
+- Accept commands from the Motion Coordinator
+- Report current axis status
+- Monitor LinuxCNC status
+
+Transitions
+
+```
+ENABLED → CONSTANT VELOCITY
+```
+
+or
+
+```
+ENABLED → POSITION MOTION
+```
+
+or
+
+```
+ENABLED → FAULT
+```
+
+---
+
+### CONSTANT VELOCITY
+
+The axis is executing a continuous velocity command through LinuxCNC.
+
+This state is primarily used during homing procedures.
+
+Motion continues until an external event, such as a limit switch signal, requests termination.
+
+The Motor object does not directly terminate motion. It reports the event and LinuxCNC remains responsible for stopping the commanded motion.
+
+Transitions
+
+```
+CONSTANT VELOCITY → ENABLED
+```
+
+or
+
+```
+CONSTANT VELOCITY → FAULT
+```
+
+---
+
+### POSITION MOTION
+
+The axis is executing a position command through LinuxCNC.
+
+LinuxCNC remains responsible for
+
+- trajectory generation
+- interpolation
+- acceleration
+- velocity limiting
+- following error detection
+
+The Motor object only monitors LinuxCNC status and determines when the commanded motion has completed.
+
+Transitions
+
+```
+POSITION MOTION → ENABLED
+```
+
+or
+
+```
+POSITION MOTION → FAULT
+```
+
+---
+
+### FAULT
+
+The axis has encountered an abnormal condition preventing safe operation.
+
+FAULT is a latched error condition and is separate from DISABLED.
+
+Examples include
+
+- LinuxCNC axis fault
+- Following error
+- Drive amplifier fault
+- Communication failure
+- Unexpected loss of axis state
+- Invalid motion command
+
+Responsibilities
+
+- Reject all motion commands
+- Preserve fault information
+- Report fault state through telemetry
+- Prevent automatic reactivation
+
+Recovery requires an explicit reset procedure.
+
+Transition
+
+```
+FAULT → DISABLED
+```
+
+after fault recovery has been completed.
+
+---
+
+The Motor state machine never performs trajectory generation or real-time control.
+
+All motion execution is delegated to LinuxCNC, while the Motor object serves only as an abstraction of axis state, command routing, and fault reporting.
 
 ---
 
@@ -646,9 +786,11 @@ LinuxCNC remains the sole owner of
 - interpolation
 - servo control
 - limit handling
-- homing
+- homing motion
 - following error detection
 - deterministic real-time execution
+
+The Motor object never commands hardware directly. Every motion request is delegated through the LinuxCNC Interface.
 
 ---
 
@@ -684,7 +826,7 @@ Servo Drives
 Mechanical Forge
 ```
 
-Information flows upward through polling.
+Information flows upward through periodic polling.
 
 Commands flow downward through delegation.
 
@@ -694,7 +836,7 @@ Every command originates in ForgeBrain.
 
 Every subsystem is synchronized by the same heartbeat.
 
-The Motion Coordinator is responsible for expanding every toolpath operation into the same deterministic safe-motion sequence:
+The Motion Coordinator expands every manufacturing operation into the invariant safe-motion sequence
 
 ```
 Retract Z
@@ -708,4 +850,6 @@ Move X/Y
 Move Z
 ```
 
-Only the target coordinates differ between operations; the execution sequence is invariant. This architecture guarantees deterministic execution, simplifies debugging, and provides a stable foundation for future sensor integration, adaptive process control, digital twins, FEM/MPM simulation, and autonomous forging algorithms without modifying the underlying machine control architecture.
+while each Motor object is responsible only for representing the operational state of a single axis and forwarding commands to LinuxCNC.
+
+This separation of responsibilities guarantees deterministic execution, simplifies debugging, and provides a stable foundation for future sensor integration, adaptive process control, digital twins, FEM/MPM simulation, and autonomous forging algorithms without modifying the underlying machine control architecture.
