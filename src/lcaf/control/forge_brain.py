@@ -17,20 +17,21 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from enum import Enum, auto
-from typing import Dict
 from typing import List
 from typing import Optional
-from typing import Any
 
 from linuxcnc_interface import LinuxCNCInterface
-from motor import Motor
+from motion_coordinator import MotionCoordinator, MotionCoordinatorState
+
+from toolpath import ToolpathOperation
+from toolpath import OperationType
+
 
 class BrainState(Enum):
 
     INITIALIZING = auto()
     IDLE = auto()
 
-    LOAD_OPERATION = auto()
     PLAN_OPERATION = auto()
     EXECUTE_OPERATION = auto()
 
@@ -66,49 +67,6 @@ class ForgeMode(Enum):
     FAULT = auto()
 
 
-class OperationType(Enum):
-    STRIKE = auto()
-    REHEAT = auto()
-    INSPECT = auto()
-    MOVE_ONLY = auto()
-    DWELL = auto()
-    CUSTOM = auto()
-
-
-class OperationPhase(Enum):
-    START = auto()
-    MOVE_XY = auto()
-    WAIT_XY = auto()
-    VERIFY_XY = auto()
-
-    MOVE_A = auto()
-    WAIT_A = auto()
-    VERIFY_A = auto()
-
-    MOVE_Z = auto()
-    WAIT_Z = auto()
-    VERIFY_Z = auto()
-
-    RETRACT_Z = auto()
-    WAIT_RETRACT = auto()
-    VERIFY_RETRACT = auto()
-
-    COMPLETE = auto()
-
-@dataclass
-class ToolpathOperation:
-
-    step: int
-    operation: OperationType
-
-    x: float
-    y: float
-    die_gap: float
-    rotation: float
-
-    target_temperature: float
-
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -117,11 +75,9 @@ class SystemState:
     # Execution
     
     toolpath_loaded: bool = False
-    active_operation: Optional[ToolpathOperation] = None
     brain_state: BrainState = BrainState.INITIALIZING
     forge_mode: ForgeMode = ForgeMode.STARTUP
     motion_state: MotionState = MotionState.UNKNOWN
-    operation_phase: OperationPhase = OperationPhase.START
 
     machine_enabled: bool = False
     machine_homed: bool = False
@@ -205,212 +161,6 @@ class SensorManager:
         for sensor in self.sensors:
             sensor.poll()
 
-class MotionCoordinator:
-
-    """
-    Coordinates all motor movement.
-
-    LinuxCNC executes motion.
-
-    MotionCoordinator only issues commands
-    and checks completion.
-    """
-
-    def __init__(self):
-        self.logger = logging.getLogger("ForgeBrain.Motion")
-
-        self.interface = LinuxCNCInterface()
-    
-        self.axes = {
-        "x": Motor("x", 0, self.interface),
-        "y": Motor("y", 1, self.interface),
-        "z": Motor("z", 2, self.interface),
-        "a": Motor("a", 3, self.interface)
-    }
-        
-
-    def poll(self):
-        """
-        Poll all motor states.
-
-        Do not log every poll cycle.
-        Motor state changes/errors should be logged
-        inside Motor.poll().
-        """
-
-        for name, motor in self.axes.items():
-
-            try:
-                motor.poll()
-
-            except Exception as e:
-
-                self.logger.exception(
-                    f"Motor poll failure: axis={name}, error={e}"
-                )
-
-                raise
-
-
-    def all_idle(self):
-        """
-        Check if all axes have completed motion.
-        """
-
-        busy_axes = []
-
-        for name, motor in self.axes.items():
-
-            if not motor.is_idle():
-                busy_axes.append(name)
-
-
-        if busy_axes:
-
-            self.logger.debug(
-                f"Motion busy: axes={busy_axes}"
-            )
-
-            return False
-
-
-        self.logger.debug(
-            "All axes idle"
-        )
-
-        return True
-
-
-    def emergency_stop(self):
-        """
-        Immediately stop all motors.
-        """
-
-        self.logger.warning(
-            "EMERGENCY STOP REQUESTED"
-        )
-
-
-        for name, motor in self.axes.items():
-
-            try:
-
-                self.logger.warning(
-                    f"Emergency stop axis={name}"
-                )
-
-                motor.emergency_stop()
-
-
-            except Exception as e:
-
-                self.logger.exception(
-                    f"Emergency stop failed: axis={name}, error={e}"
-                )
-
-
-        idle = self.all_idle()
-
-
-        if idle:
-
-            self.logger.warning(
-                "Emergency stop complete: all axes idle"
-            )
-
-        else:
-
-            self.logger.error(
-                "Emergency stop incomplete: motors still active"
-            )
-
-
-        return idle
-
-
-    def move_axis(self, axis: str, position: float):
-        """
-        Command a single axis movement.
-        """
-
-        if axis not in self.axes:
-
-            self.logger.error(
-                f"Invalid axis command: axis={axis}"
-            )
-
-            raise ValueError(
-                f"Unknown axis {axis}"
-            )
-
-
-        motor = self.axes[axis]
-
-
-        self.logger.info(
-            f"MOTION COMMAND: "
-            f"axis={axis}, "
-            f"target={position}"
-        )
-
-
-        try:
-
-            motor.move_to(position)
-
-
-            self.logger.info(
-                f"MOTION ACCEPTED: "
-                f"axis={axis}, "
-                f"target={position}"
-            )
-
-
-        except Exception as e:
-
-            self.logger.exception(
-                f"MOTION COMMAND FAILED: "
-                f"axis={axis}, "
-                f"target={position}, "
-                f"error={e}"
-            )
-
-            raise
-
-
-    def home_all(self):
-        """
-        Home all machine axes.
-        """
-
-        self.logger.info(
-            "HOMING START: all axes"
-        )
-
-
-        for name, motor in self.axes.items():
-
-            try:
-
-                self.logger.info(
-                    f"HOMING COMMAND: axis={name}"
-                )
-
-                motor.home()
-
-
-            except Exception as e:
-
-                self.logger.exception(
-                    f"HOMING FAILED: axis={name}, error={e}"
-                )
-
-                raise
-
-
-        self.logger.info(
-            "HOMING COMMANDS ISSUED: all axes"
-        )
 
 class ForgeBrain:
 
@@ -531,9 +281,6 @@ class ForgeBrain:
         elif state == BrainState.IDLE:
             self.idle()
 
-        elif state == BrainState.LOAD_OPERATION:
-            self.load_operation()
-
         elif state == BrainState.PLAN_OPERATION:
             self.plan_operation()
 
@@ -576,28 +323,7 @@ class ForgeBrain:
 
         self.state.brain_state = state
 
-    def set_operation_phase(self,phase: OperationPhase, message: str = ""):
-        if self.state.operation_phase == phase:
-            return
-
-        operation = self.state.active_operation
-
-        if operation:
-            context = f"Step {operation.step}"
-        else:
-            context = "No active operation"
-
-        self.log_event(
-            f"{context}: Operation phase changed from "
-            f"{self.state.operation_phase.name} "
-            f"to {phase.name}"
-        )
-
-        if message:
-            self.log_event(message)
-
-        self.state.operation_phase = phase
-
+    
     def set_motion_state(self, state: MotionState, message: str = ""):
         if self.state.motion_state == state:
             return
@@ -703,253 +429,87 @@ class ForgeBrain:
         )
 
     def execute_operation(self):
-
-        operation = self.state.active_operation
+        
+        operation = self.queue.current()
 
         if operation is None:
+
             self.set_fault("No active operation.")
+
             return
 
-        phase = self.state.operation_phase
+        #
+        # Start the Motion Coordinator exactly once.
+        #
+        #chat gpt it says MotionCoordinatorState not defined 
+        if self.motion.state == MotionCoordinatorState.IDLE:
 
-        #start
-        if phase == OperationPhase.START:
+            self.motion.start(operation)
+            self.state.current_step = operation.step
 
-            self.log_event(
-                f"Executing step {operation.step}"
+        #
+        # Advance the Motion Coordinator HFSM.
+        #
+        self.motion.update()
+
+        #
+        # Motion fault?
+        #
+        if self.motion.has_fault():
+
+            self.set_fault(self.motion.fault_message)
+
+            return
+
+        #
+        # Finished?
+        #
+        if self.motion.is_complete():
+
+            self.motion.reset()
+
+            self.set_brain_state(
+                BrainState.VERIFY_OPERATION
             )
 
-            self.set_operation_phase(OperationPhase.MOVE_XY)
-            return
+    def plan_operation(self):
 
-        # move xy
-        if phase == OperationPhase.MOVE_XY:
-            self.set_motion_state(MotionState.MOVING, "Motion command issued in xy")
-            self.motion.move_axis("x", operation.x)
-            self.motion.move_axis("y", operation.y)
-            self.set_operation_phase(OperationPhase.WAIT_XY)
-            return
-
-        # wait xy
-        if phase == OperationPhase.WAIT_XY:
-            if (
-                self.motion.axes["x"].is_idle()
-                and
-                self.motion.axes["y"].is_idle()
-            ):
-                self.set_operation_phase(OperationPhase.VERIFY_XY)
-
-            return
-
-      
-        # verify xy
-        if phase == OperationPhase.VERIFY_XY:
-            #
-            # TODO verify through:
-            #
-            # collision check
-            #
-
-            self.set_operation_phase(OperationPhase.MOVE_A)
-            return
-
-       #move a 
-        if phase == OperationPhase.MOVE_A:
-            self.set_motion_state(MotionState.MOVING, "Motion command issued in a")
-            
-
-            self.motion.move_axis(
-                "a",
-                operation.rotation
-            )
-
-            self.set_operation_phase(OperationPhase.WAIT_A)
-            return
-
-        #wait a
-        if phase == OperationPhase.WAIT_A:
-
-            if self.motion.axes["a"].is_idle():
-
-                self.set_operation_phase(OperationPhase.VERIFY_A)
-
-            return
-
-        #verify a
-        if phase == OperationPhase.VERIFY_A:
-
-            if operation.operation == OperationType.REHEAT:
-
-                self.set_forge_mode(ForgeMode.REHEATING)
-                self.set_operation_phase(OperationPhase.COMPLETE)
-
-            elif operation.operation == OperationType.INSPECT:
-
-                self.set_forge_mode(ForgeMode.INSPECTING)
-                self.set_operation_phase(OperationPhase.COMPLETE)
-
-            elif operation.operation == OperationType.MOVE_ONLY:
-
-                self.set_forge_mode(ForgeMode.POSITIONING)
-                self.set_operation_phase(OperationPhase.COMPLETE)
-                
-
-            elif operation.operation == OperationType.DWELL:
-
-                self.set_forge_mode(ForgeMode.WAITING)
-
-                seconds = operation.metadata.get(
-                    "seconds",
-                    1.0
-                )
-
-                self.motion.interface.dwell(seconds)
-
-                self.set_operation_phase(OperationPhase.COMPLETE)
-
-            elif operation.operation == OperationType.CUSTOM:
-
-                mdi = operation.metadata.get("mdi")
-
-                if mdi:
-
-                    self.motion.interface.execute_mdi(mdi)
-
-                self.set_operation_phase(OperationPhase.COMPLETE)
-
-            else:
-
-                self.set_operation_phase(OperationPhase.MOVE_Z)
-
-            return
-
-        #move z 
-        if phase == OperationPhase.MOVE_Z:
-            self.set_motion_state(MotionState.MOVING, "Motion command issued in z")
-
-            self.motion.move_axis(
-                "z",
-                operation.die_gap
-            )
-
-            self.set_forge_mode(ForgeMode.STRIKING)
-            
-
-            self.set_operation_phase(OperationPhase.WAIT_Z)
-
-            return
-
-        #wait z 
-        if phase == OperationPhase.WAIT_Z:
-
-            if self.motion.axes["z"].is_idle():
-
-                self.set_operation_phase(OperationPhase.VERIFY_Z)
-
-            return
-
-        #verify z
-        if phase == OperationPhase.VERIFY_Z:
-
-            #
-            # TODO: verify z placement through any or multiple of the following:
-            #
-            # load cell
-            # stroke sensor
-            # displacement sensor
-            # force verification
-            #
-
-            self.set_operation_phase(OperationPhase.RETRACT_Z)
-
-            return
-
-        #retract 
-        if phase == OperationPhase.RETRACT_Z:
-
-            self.motion.move_axis("z", 0.0)
-
-            self.set_operation_phase(OperationPhase.WAIT_RETRACT)
-
-            return
-
-        #wait retract 
-        if phase == OperationPhase.WAIT_RETRACT:
-
-            if self.motion.axes["z"].is_idle():
-
-                self.set_operation_phase(OperationPhase.VERIFY_RETRACT)
-
-            return
-
-        #verify retract 
-        if phase == OperationPhase.VERIFY_RETRACT:
-
-
-            # verify fully clear of workpiece
-            self.set_operation_phase(OperationPhase.COMPLETE)
-
-            return
-
-        # complete
-        if phase == OperationPhase.COMPLETE:
-
-            self.set_operation_phase(OperationPhase.START)
-
-            self.set_motion_state(MotionState.COMPLETE, "Operation complete")
-
-            self.set_brain_state(BrainState.VERIFY_OPERATION)
-
-            return
-
-        self.set_fault(
-            f"Unknown operation phase: {phase}"
-        )
-    
-    def load_operation(self):
-
+        # No work remaining?
         if self.queue.finished:
-
             self.set_brain_state(
                 BrainState.COMPLETE_TOOLPATH
             )
-
             return
-
-
+        
+        # Retrieve next operation
         operation = self.queue.current()
 
         if operation is None:
             self.set_fault(
-                "Toolpath queue returned no operation"
+                "Toolpath queue returned no operation."
             )
             return
 
-
-        self.state.active_operation = operation
-
+        # Store execution state
         self.state.current_step = operation.step
 
-        self.set_brain_state(
-            BrainState.PLAN_OPERATION
+        # TODO: 
+        # Validate coordinates
+        # Validate temperatures
+        # Select die
+        # Generate LinuxCNC motion
+
+        self.set_forge_mode(
+            ForgeMode.POSITIONING
         )
 
         self.log_event(
-            f"Loaded operation {operation.step}"
+            f"Planning operation {operation.step}"
         )
 
-    def plan_operation(self):
-
-        #
-        # TODO:
-        #   verify temperature
-        #   verify sensors
-        #   collision checks
-        #   die selection
-        #
-
-        self.set_forge_mode(ForgeMode.POSITIONING)
-        self.set_brain_state(BrainState.EXECUTE_OPERATION)
+        self.set_brain_state(
+            BrainState.EXECUTE_OPERATION
+        )
 
 
     def initialize_machine(self):
@@ -1001,7 +561,7 @@ class ForgeBrain:
         self.set_forge_mode(ForgeMode.WAITING)
         self.set_motion_state(MotionState.READY)
 
-        self.set_brain_state(BrainState.LOAD_OPERATION)
+        self.set_brain_state(BrainState.PLAN_OPERATION)
 
         self.log_event(
             "Starting toolpath execution"
@@ -1010,7 +570,7 @@ class ForgeBrain:
 
     def complete_operation(self):
 
-        operation = self.state.active_operation
+        operation = self.queue.current()
 
         if operation is None:
             self.set_fault("No active operation")
@@ -1025,8 +585,6 @@ class ForgeBrain:
         self.log_event(
             f"Completed operation {operation.step}"
         )
-
-        self.state.active_operation = None
 
         self.set_brain_state(BrainState.ADAPT_OPERATION)
 
@@ -1070,7 +628,7 @@ class ForgeBrain:
 
     def verify_operation(self):
 
-        operation = self.state.active_operation
+        operation = self.queue.current()
 
         if operation is None:
             self.set_fault("No operation to verify")
@@ -1105,7 +663,7 @@ class ForgeBrain:
             self.set_brain_state(BrainState.COMPLETE_TOOLPATH)
             return
         
-        self.set_brain_state(BrainState.LOAD_OPERATION)
+        self.set_brain_state(BrainState.PLAN_OPERATION)
 
     def complete_toolpath(self):
         self.set_forge_mode(ForgeMode.COMPLETE)

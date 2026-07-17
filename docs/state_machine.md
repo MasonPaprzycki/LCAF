@@ -95,76 +95,60 @@ INITIALIZING
 IDLE
 │
 ▼
-LOAD_OPERATION
-│
-▼
 PLAN_OPERATION
-│
-▼
+        │
+        ▼
 EXECUTE_OPERATION
-│
-│
-├─────────────────────────────────────────────────────────────────────────────┐
-│                                                                             │
-│                           Motion Coordinator                                │
-│                                                                             │
-│      Executes every manufacturing operation using a deterministic           │
-│      safe-motion sequence.                                                  │
-│                                                                             │
-│     ┌──────────────────────────────────────────────────────────────┐        │
-│     │                                                              │        │
-│     ▼                                                              ▼        │
-│  Retract Z                                                  Verify Z Safe    │
-│     │                                                              │        │
-│     ▼                                                              ▼        │
-│  Retract X/Y                                                Verify X/Y Safe  │
-│     │                                                              │        │
-│     ▼                                                              ▼        │
-│  Rotate A                                                   Verify Rotation  │
-│     │                                                              │        │
-│     ▼                                                              ▼        │
-│  Move X/Y                                                   Verify X/Y       │
-│     │                                                              │        │
-│     ▼                                                              ▼        │
-│  Move Z                                                     Verify Z         │
-│     │                                                              │        │
-│     └──────────────────────────────┬───────────────────────────────┘        │
-│                                    ▼                                        │
-│                              Motion Complete                                │
-│                                                                             │
-│      Every motion request is delegated to one or more Motor objects.        │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-│
-▼
+        │
+        │ supervises
+        ▼
+┌───────────────────────────────────────────┐
+│ Motion Coordinator HFSM                   │
+│                                           │
+│ IDLE                                      │
+│   ↓                                       │
+│ RETRACT_Z                                │
+│   ↓                                       │
+│ VERIFY_Z_RETRACTED                       │
+│   ↓                                       │
+│ RETRACT_XY                               │
+│   ↓                                       │
+│ VERIFY_XY_RETRACTED                      │
+│   ↓                                       │
+│ ROTATE_A                                 │
+│   ↓                                       │
+│ VERIFY_ROTATION                          │
+│   ↓                                       │
+│ MOVE_XY                                  │
+│   ↓                                       │
+│ VERIFY_XY_POSITION                       │
+│   ↓                                       │
+│ MOVE_Z                                   │
+│   ↓                                       │
+│ VERIFY_Z_POSITION                        │
+│   ↓                                       │
+│ COMPLETE                                 │
+└───────────────────────────────────────────┘
+        │
+        ▼
 VERIFY_OPERATION
 │
 ▼
 ADAPT_OPERATION
 │
 ▼
-NEXT_OPERATION
+PLAN_OPERATION
 │
-├────────────── More Operations? ──────────────┐
-│                                              │
-│ Yes                                          │ No
-│                                              │
-▼                                              ▼
-LOAD_OPERATION                          COMPLETE_TOOLPATH
-                                               │
-                                               ▼
-                                             IDLE
+├────────────── More Operations? ────────────────────┐
+│                                                    │
+│ Yes                                                │ No
+│                                                    │
+▼                                                    ▼
+EXECUTE_OPERATION                            COMPLETE_TOOLPATH
+                                                     │
+                                                     ▼
+                                                    IDLE
 
-
-Any State
-
-↓
-
-FAULT
-
-↓
-
-SHUTDOWN
 ```
 
 ---
@@ -218,38 +202,11 @@ Responsibilities
 Exit
 
 ```
-IDLE → LOAD_OPERATION
+IDLE → PLAN_OPERATION
 ```
 
 ---
 
-## LOAD_OPERATION
-
-Purpose
-
-Load the next JSONL operation.
-
-Responsibilities
-
-- Read Toolpath Queue
-- Decode target X, Y, Z, and A positions
-- Store current operation
-- Increment execution pointer
-- Verify operation exists
-
-Exit
-
-```
-LOAD_OPERATION → PLAN_OPERATION
-```
-
-or
-
-```
-LOAD_OPERATION → COMPLETE_TOOLPATH
-```
-
----
 
 ## PLAN_OPERATION
 
@@ -259,10 +216,13 @@ Prepare the next manufacturing operation.
 
 Current Responsibilities
 
+- Exit to COMPLETE_TOOLPATH if there is no operation left in the queue 
+- Increment to the next step in the queue and read it to get the upcoming JSON operation, and verify it exists
+- Store current operation 
 - Decode JSON operation
 - Select operation type
 - Validate target coordinates
-- Prepare the standard motion sequence
+- Pass ToolpathOperation to MotionCoordinator for expansion into motion commands. 
 
 Future Responsibilities
 
@@ -277,128 +237,58 @@ Exit
 ```
 PLAN_OPERATION → EXECUTE_OPERATION
 ```
+or
+
+```
+PLAN_OPERATION → COMPLETE_TOOLPATH
+```
 
 ---
 
 ## EXECUTE_OPERATION
-
-Purpose
-
-Execute exactly one manufacturing operation.
-
-ForgeBrain never directly commands LinuxCNC.
-
-Instead
-
-```
-ForgeBrain
+EXECUTE_OPERATION
 
 ↓
 
-Motion Coordinator
+Retrieve current ToolpathOperation
 
 ↓
 
-Motor
+Motion Coordinator IDLE?
+
+├── Yes
+│
+│   Start Motion Coordinator
+│
+└── No
+     │
+     ▼
+
+Update Motion Coordinator
 
 ↓
 
-LinuxCNC Interface
+Motion Fault?
+
+├── Yes → FAULT
+│
+└── No
+     │
+     ▼
+
+Motion Complete?
+
+├── No
+│
+└── Yes
+     │
+     ▼
+
+Reset Motion Coordinator
 
 ↓
 
-LinuxCNC
-
-↓
-
-HAL
-
-↓
-
-Mesa FPGA
-
-↓
-
-Servo Drive
-
-↓
-
-Motor
-```
-
-Every manufacturing operation follows the same deterministic safe-motion sequence.
-
-```
-START
-
-↓
-
-Retract Z
-
-↓
-
-Wait for LinuxCNC
-
-↓
-
-Verify Z Safe
-
-↓
-
-Retract X/Y
-
-↓
-
-Wait for LinuxCNC
-
-↓
-
-Verify X/Y Safe
-
-↓
-
-Rotate A
-
-↓
-
-Wait for LinuxCNC
-
-↓
-
-Verify Rotation
-
-↓
-
-Move X/Y
-
-↓
-
-Wait for LinuxCNC
-
-↓
-
-Verify X/Y
-
-↓
-
-Move Z
-
-↓
-
-Wait for LinuxCNC
-
-↓
-
-Verify Z
-
-↓
-
-Motion Complete
-```
-
-The next manufacturing stage cannot begin until the previous stage reports completion.
-
----
+VERIFY_OPERATION
 
 ## VERIFY_OPERATION
 
@@ -406,11 +296,16 @@ Purpose
 
 Verify successful completion.
 
+For now this process is redundant because motion is verified in the motion coordinator but this process provides a step to verify other expected adaptive behavior. All adaptive determminism logic will go in ADAPT_OPERATION but this is where we would make sure we did what we wanted. 
+
 Current Responsibilities
 
+- Verify that an operation has been completed 
 - Machine enabled
 - LinuxCNC operational
 - Motion completed
+- Record statistics and other bookeeping 
+- Move to fault if a significant error is found in verification
 
 Future Responsibilities
 
@@ -443,7 +338,7 @@ This state intentionally exists to support future autonomous manufacturing.
 
 Current Responsibilities
 
-- No adaptive behaviour
+- No adaptive behaviour yet, when adaptive behavior is implemented it will update the queue
 
 Future Responsibilities
 
@@ -460,29 +355,7 @@ Future Responsibilities
 Exit
 
 ```
-ADAPT_OPERATION → NEXT_OPERATION
-```
-
----
-
-## NEXT_OPERATION
-
-Purpose
-
-Determine whether additional manufacturing operations remain.
-
-Exit
-
-If operations remain
-
-```
-NEXT_OPERATION → LOAD_OPERATION
-```
-
-Otherwise
-
-```
-NEXT_OPERATION → COMPLETE_TOOLPATH
+ADAPT_OPERATION → PLAN_OPERATION
 ```
 
 ---
@@ -1198,25 +1071,25 @@ ForgeBrain
 Motion Coordinator
         │
         ▼
-Motor
+      Motor
         │
         ▼
 LinuxCNC Interface
         │
         ▼
-LinuxCNC
+     LinuxCNC
         │
         ▼
-HAL
+       HAL
         │
         ▼
-Mesa FPGA
+    Mesa FPGA
         │
         ▼
-Servo Drives
+   Servo Drives
         │
         ▼
-Mechanical Forge
+  Mechanical Forge
 ```
 
 Information flows upward through periodic polling.
