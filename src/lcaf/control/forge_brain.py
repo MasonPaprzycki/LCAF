@@ -32,14 +32,11 @@ class BrainState(Enum):
     INITIALIZING = auto()
     IDLE = auto()
 
-    PLAN_OPERATION = auto()
     EXECUTE_OPERATION = auto()
 
-    VERIFY_OPERATION = auto()      # verify completed operation
-    COMPLETE_OPERATION = auto()    # bookkeeping
+    VERIFY_OPERATION = auto()      # verify completed operation and handle book keeping
 
     ADAPT_OPERATION = auto()       # sensor analysis / adaptive logic
-    NEXT_OPERATION = auto()
 
     COMPLETE_TOOLPATH = auto()
 
@@ -65,9 +62,6 @@ class ForgeMode(Enum):
     WAITING = auto()
     COMPLETE = auto()
     FAULT = auto()
-
-
-
 
 @dataclass
 class SystemState:
@@ -281,23 +275,14 @@ class ForgeBrain:
         elif state == BrainState.IDLE:
             self.idle()
 
-        elif state == BrainState.PLAN_OPERATION:
-            self.plan_operation()
-
         elif state == BrainState.EXECUTE_OPERATION:
             self.execute_operation()
 
         elif state == BrainState.VERIFY_OPERATION:
             self.verify_operation()
 
-        elif state == BrainState.COMPLETE_OPERATION:
-            self.complete_operation()
-
         elif state == BrainState.ADAPT_OPERATION:
             self.adapt_operation()
-
-        elif state == BrainState.NEXT_OPERATION:
-            self.next_operation()
 
         elif state == BrainState.COMPLETE_TOOLPATH:
             self.complete_toolpath()
@@ -428,89 +413,6 @@ class ForgeBrain:
             f"Loaded {len(self.queue.operations)} operations."
         )
 
-    def execute_operation(self):
-        
-        operation = self.queue.current()
-
-        if operation is None:
-
-            self.set_fault("No active operation.")
-
-            return
-
-        #
-        # Start the Motion Coordinator exactly once.
-        #
-        #chat gpt it says MotionCoordinatorState not defined 
-        if self.motion.state == MotionCoordinatorState.IDLE:
-
-            self.motion.start(operation)
-            self.state.current_step = operation.step
-
-        #
-        # Advance the Motion Coordinator HFSM.
-        #
-        self.motion.update()
-
-        #
-        # Motion fault?
-        #
-        if self.motion.has_fault():
-
-            self.set_fault(self.motion.fault_message)
-
-            return
-
-        #
-        # Finished?
-        #
-        if self.motion.is_complete():
-
-            self.motion.reset()
-
-            self.set_brain_state(
-                BrainState.VERIFY_OPERATION
-            )
-
-    def plan_operation(self):
-
-        # No work remaining?
-        if self.queue.finished:
-            self.set_brain_state(
-                BrainState.COMPLETE_TOOLPATH
-            )
-            return
-        
-        # Retrieve next operation
-        operation = self.queue.current()
-
-        if operation is None:
-            self.set_fault(
-                "Toolpath queue returned no operation."
-            )
-            return
-
-        # Store execution state
-        self.state.current_step = operation.step
-
-        # TODO: 
-        # Validate coordinates
-        # Validate temperatures
-        # Select die
-        # Generate LinuxCNC motion
-
-        self.set_forge_mode(
-            ForgeMode.POSITIONING
-        )
-
-        self.log_event(
-            f"Planning operation {operation.step}"
-        )
-
-        self.set_brain_state(
-            BrainState.EXECUTE_OPERATION
-        )
-
 
     def initialize_machine(self):
 
@@ -561,19 +463,77 @@ class ForgeBrain:
         self.set_forge_mode(ForgeMode.WAITING)
         self.set_motion_state(MotionState.READY)
 
-        self.set_brain_state(BrainState.PLAN_OPERATION)
+        self.set_brain_state(BrainState.EXECUTE_OPERATION)
 
         self.log_event(
             "Starting toolpath execution"
         )
 
+    def execute_operation(self):
 
-    def complete_operation(self):
+         # No work remaining?
+        if self.queue.finished:
+            self.set_brain_state(
+                BrainState.COMPLETE_TOOLPATH
+            )
+            return
+        
+        # Retrieve next operation
+        operation = self.queue.current()
+
+        if operation is None:
+            self.set_fault(
+                "Toolpath queue returned no operation."
+            )
+            return
+        
+        # Start the Motion Coordinator exactly once.
+        if self.motion.state == MotionCoordinatorState.IDLE:
+
+            self.motion.start(operation)
+
+        # Advance the Motion Coordinator HFSM.
+        self.motion.update()
+
+        # Motion fault?
+        if self.motion.has_fault():
+
+            self.set_fault(self.motion.fault_message)
+
+            return
+
+        # Finished?
+        if self.motion.is_complete():
+
+            self.motion.reset()
+
+            self.set_brain_state(
+                BrainState.VERIFY_OPERATION
+            )
+
+    def verify_operation(self):
 
         operation = self.queue.current()
 
         if operation is None:
-            self.set_fault("No active operation")
+            self.set_fault("No operation to verify")
+            return
+
+        #
+        # TODO:
+        #
+        # Verify none of the motors skipped steps
+        # Check for any other machine faults
+
+        interface = self.motion.interface
+        interface.update()
+
+        if interface.estop():
+            self.set_fault("Machine entered ESTOP")
+            return
+
+        if not interface.machine_on():
+            self.set_fault("Machine disabled")
             return
 
         self.queue.advance()
@@ -583,7 +543,7 @@ class ForgeBrain:
         self.command_history.append(operation)
 
         self.log_event(
-            f"Completed operation {operation.step}"
+            f"Verified operation {operation.step}"
         )
 
         self.set_brain_state(BrainState.ADAPT_OPERATION)
@@ -594,11 +554,12 @@ class ForgeBrain:
         """
         Adaptive manufacturing stage.
 
-        This executes exactly once between every
-        ToolpathOperation loaded from the JSONL file.
+        At the end of the function it modifies the tool path queue.
+        The modifications are based on the analysis of the current operation and the state of the machine.
+        If it needs to reheat it will insert a reheat operation into the tool path queue. 
+        If it needs to modify the tool path it will simply change the next or any following tool paths in the queue.
 
         Future responsibilities:
-
             • Thermal camera processing
             • 3D scan analysis
             • Die separation measurement
@@ -624,47 +585,9 @@ class ForgeBrain:
         # self.schedule_reheat()
         #
 
-        self.set_brain_state(BrainState.NEXT_OPERATION)
+        self.set_brain_state(BrainState.EXECUTE_OPERATION)
 
-    def verify_operation(self):
-
-        operation = self.queue.current()
-
-        if operation is None:
-            self.set_fault("No operation to verify")
-            return
-
-        #
-        # TODO:
-        #
-        # Verify none of the motors skipped steps
-        # Potentially check for any other machine faults 
-        #
-
-        interface = self.motion.interface
-        interface.update()
-
-        if interface.estop():
-            self.set_fault("Machine entered ESTOP")
-            return
-
-        if not interface.machine_on():
-            self.set_fault("Machine disabled")
-            return
-
-        self.log_event(
-            f"Verified operation {operation.step}"
-        )
-
-        self.set_brain_state(BrainState.COMPLETE_OPERATION)
-
-    def next_operation(self):
-        if self.queue.finished:
-            self.set_brain_state(BrainState.COMPLETE_TOOLPATH)
-            return
-        
-        self.set_brain_state(BrainState.PLAN_OPERATION)
-
+    
     def complete_toolpath(self):
         self.set_forge_mode(ForgeMode.COMPLETE)
         self.set_motion_state(MotionState.READY, "Toolpath complete")

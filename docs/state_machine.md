@@ -7,17 +7,21 @@ The Low Cost Agility Forge (LCAF) control software is implemented as a **Hierarc
 The hierarchy is
 
 ```
-ForgeBrain
-    │
-    ├── Motion Coordinator
-    │       │
-    │       ├── Motor X
-    │       ├── Motor Y
-    │       ├── Motor Z
-    │       └── Motor A
-    │
-    ├── Toolpath Queue
-    │
+*independent                     *independent 
+
+ForgeBrain                      AdaptativePlanner
+    │                                   |
+    ├── Motion Coordinator              |
+    │       │                           |
+    │       ├── Motor X                 |
+    │       ├── Motor Y                 |
+    │       ├── Motor Z                 |
+    │       └── Motor A                 |
+    │                                   |
+    ├── Toolpath Queue ─────────────────┘
+    │   ForgeBrain calls adapt() to to pull the adapted execution queue 
+    |      Then ForgeBrain internally updates its execution queue 
+    |
     ├── Sensor Manager
     │
     ├── Telemetry
@@ -27,9 +31,7 @@ ForgeBrain
 
 **ForgeBrain** controls when and how commands are executed thorugh the subsystem.  
 
-No subsystem executes independently. And no module has its own execution loop.
-
-Every module is updated once every heartbeat.
+**AdaptativePlanner** AdaptivePlanner subscribes to the telemetry stream and processes new telemetry asynchronously. It will run simulation and analysis independently but it is only involved in the state machine when forge brain calls adapt() to update its tool path execution queue. Everything else is updated deterministically by Forge brain once every heart beat.  
 
 ---
 
@@ -42,23 +44,19 @@ Heartbeat
 
 ↓
 
-Update LinuxCNC
+Pull Sensor States
 
 ↓
 
-Update Motor States   
+Pull from Motion Coordinator which pulls motor states and diagnostics from linuxcnc 
 
 ↓
 
-Update Sensor States
+Publish telemetry to a central channel
 
 ↓
 
-Update Motion Coordinator
-
-↓
-
-Update ForgeBrain State Machine
+Update ForgeBrain State Machine which then updates motion coordinator and might pull the adaptive step from the AdaptativePlanner
 
 ↓
 
@@ -67,10 +65,6 @@ Generate commands
 ↓
 
 Send commands down hiearchy 
-
-↓
-
-Publish Telemetry
 
 ↓
 
@@ -84,20 +78,38 @@ Repeat
 Every subsystem reads the same LinuxCNC snapshot guaranteeing deterministic behavior across the entire controller.
 
 ---
-# Hierarchical State Machine
-
-The complete controller hierarchy is shown below.
-
+# System architecture 
 ```
+
+
+                          ┌────────────────────────────┐
+                          │     Adaptive Planner       │
+                          │                            │
+                          │  Sensor Fusion             │
+                          │  Process Models            │
+                          │  FEM / MPM                 │
+┌─────────┐               │  Digital Twin              │
+│Telemetry│──────────────>│  AI Planning               │
+└─────────┘               │  Robotics Web              │
+     |                    └────────────┬───────────────┘
+     |                                 |
+     |                                 |
+     |                                 |
+     |                                 │ FprgeBrain pulls adapted tool path queue 
+     |                                 │   during ADAPT_OPERATION
+     |                                 │
+     ▼                                 ▼
+┌───────────────────────────────────────────┐
+|             ForgeBrain HFSM               │
+└───────────────────────────────────────────┘
+      | 
+      ▼
 INITIALIZING
 │
 ▼
 IDLE
 │
 ▼
-PLAN_OPERATION
-        │
-        ▼
 EXECUTE_OPERATION
         │
         │ supervises
@@ -107,44 +119,44 @@ EXECUTE_OPERATION
 │                                           │
 │ IDLE                                      │
 │   ↓                                       │
-│ RETRACT_Z                                │
+│ RETRACT_Z                                 │
 │   ↓                                       │
-│ VERIFY_Z_RETRACTED                       │
+│ VERIFY_Z_RETRACTED                        │
 │   ↓                                       │
-│ RETRACT_XY                               │
+│ RETRACT_XY                                │
 │   ↓                                       │
-│ VERIFY_XY_RETRACTED                      │
+│ VERIFY_XY_RETRACTED                       │
 │   ↓                                       │
-│ ROTATE_A                                 │
+│ ROTATE_A                                  │
 │   ↓                                       │
-│ VERIFY_ROTATION                          │
+│ VERIFY_ROTATION                           │
 │   ↓                                       │
-│ MOVE_XY                                  │
+│ MOVE_XY                                   │
 │   ↓                                       │
-│ VERIFY_XY_POSITION                       │
+│ VERIFY_XY_POSITION                        │
 │   ↓                                       │
-│ MOVE_Z                                   │
+│ MOVE_Z                                    │
 │   ↓                                       │
-│ VERIFY_Z_POSITION                        │
+│ VERIFY_Z_POSITION                         │
 │   ↓                                       │
-│ COMPLETE                                 │
+│ COMPLETE                                  │
 └───────────────────────────────────────────┘
         │
         ▼
 VERIFY_OPERATION
 │
 ▼
-ADAPT_OPERATION
+ADAPT_OPERATION (updates tool path queue from AdaptativePlanner)
 │
 ▼
-PLAN_OPERATION
+EXECUTE_OPERATION
 │
 ├────────────── More Operations? ────────────────────┐
 │                                                    │
 │ Yes                                                │ No
 │                                                    │
 ▼                                                    ▼
-EXECUTE_OPERATION                            COMPLETE_TOOLPATH
+will execute the operation                   COMPLETE_TOOLPATH
                                                      │
                                                      ▼
                                                     IDLE
@@ -202,50 +214,26 @@ Responsibilities
 Exit
 
 ```
-IDLE → PLAN_OPERATION
+IDLE → EXECUTE_OPERATION
 ```
 
 ---
 
-
-## PLAN_OPERATION
-
-Purpose
-
-Prepare the next manufacturing operation.
+## EXECUTE_OPERATION
 
 Current Responsibilities
 
-- Exit to COMPLETE_TOOLPATH if there is no operation left in the queue 
-- Increment to the next step in the queue and read it to get the upcoming JSON operation, and verify it exists
+- Exit to COMPLETE_TOOLPATH if there is no operation left in the queue
+
+- Increment to the next step in the queue and read it to get the upcoming JSON 
+operation.
+
 - Store current operation 
 - Decode JSON operation
 - Select operation type
 - Validate target coordinates
 - Pass ToolpathOperation to MotionCoordinator for expansion into motion commands. 
 
-Future Responsibilities
-
-- Thermal planning
-- Process planning
-- Tool verification
-- Simulation lookup
-- Adaptive planning
-
-Exit
-
-```
-PLAN_OPERATION → EXECUTE_OPERATION
-```
-or
-
-```
-PLAN_OPERATION → COMPLETE_TOOLPATH
-```
-
----
-
-## EXECUTE_OPERATION
 EXECUTE_OPERATION
 
 ↓
@@ -296,7 +284,7 @@ Purpose
 
 Verify successful completion.
 
-For now this process is redundant because motion is verified in the motion coordinator but this process provides a step to verify other expected adaptive behavior. All adaptive determminism logic will go in ADAPT_OPERATION but this is where we would make sure we did what we wanted. 
+For now this process is redundant because motion is verified in the motion coordinator but this process provides a step to verify other expected adaptive behavior. And to maybe verify if the motors skipped any steps. All adaptive determminism logic will go in ADAPT_OPERATION but this is where we would make sure we did what we wanted. 
 
 Current Responsibilities
 
