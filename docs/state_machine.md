@@ -143,9 +143,6 @@ EXECUTE_OPERATION
 └───────────────────────────────────────────┘
         │
         ▼
-VERIFY_OPERATION
-│
-▼
 ADAPT_OPERATION (updates tool path queue from AdaptativePlanner)
 │
 ▼
@@ -276,45 +273,9 @@ Reset Motion Coordinator
 
 ↓
 
-VERIFY_OPERATION
+ADAPT_OPERATION
 
-## VERIFY_OPERATION
 
-Purpose
-
-Verify successful completion.
-
-For now this process is redundant because motion is verified in the motion coordinator but this process provides a step to verify other expected adaptive behavior. And to maybe verify if the motors skipped any steps. All adaptive determminism logic will go in ADAPT_OPERATION but this is where we would make sure we did what we wanted. 
-
-Current Responsibilities
-
-- Verify that an operation has been completed 
-- Machine enabled
-- LinuxCNC operational
-- Motion completed
-- Record statistics and other bookeeping 
-- Move to fault if a significant error is found in verification
-
-Future Responsibilities
-
-- Sensor verification
-- Force verification
-- Thermal verification
-- Geometry verification
-
-Exit
-
-```
-VERIFY_OPERATION → ADAPT_OPERATION
-```
-
-or
-
-```
-VERIFY_OPERATION → FAULT
-```
-
----
 
 ## ADAPT_OPERATION
 
@@ -324,11 +285,13 @@ Provide a single abstraction layer between manufacturing operations.
 
 This state intentionally exists to support future autonomous manufacturing.
 
+It includes a pass to the adaptive_planner which will execute verifiecation of previous expected behavior reports logistics and adapts tool paths. 
+
 Current Responsibilities
 
-- No adaptive behaviour yet, when adaptive behavior is implemented it will update the queue
+- Not implemented yet, when adaptive behavior is implemented it will update the queue
 
-Future Responsibilities
+A list of potential future responsibilities
 
 - Billet temperature estimation
 - FEM integration
@@ -792,24 +755,19 @@ Each Motor maintains its own operational state.
                      UNINITIALIZED
                            │
                            ▼
-                      DISABLED
-                           │
-                    Enable Axis
-                           │
-                           ▼
-                        ENABLED
+                        READY
                      ┌─────┴─────┐
-                     │           │
+                     │   MOVING  │
                      ▼           ▼
-          CONSTANT VELOCITY   POSITION MOTION
-             (Homing)          (Toolpath Move)
+                   HOMING      MOVING
+              (constant vel)  (Toolpath sub operation)
                      │           │
                      └─────┬─────┘
                            │
-                 Motion Complete
+                        COMPLETE
                            │
                            ▼
-                        ENABLED
+                        READY
 
 
 Any Operational State
@@ -828,7 +786,7 @@ Any Operational State
 
         ▼
 
-    DISABLED
+    READY
 ```
 
 ## State Definitions
@@ -846,39 +804,13 @@ Responsibilities
 Transition
 
 ```
-UNINITIALIZED → DISABLED
+UNINITIALIZED → READY
 ```
 
 ---
 
-### DISABLED
 
-The axis is intentionally disabled and available for future activation.
-
-This is the normal safe state of an axis.
-
-Responsibilities
-
-- Reject motion commands
-- Report disabled status
-- Await enable request
-- Maintain fault-free state
-
-Transition
-
-```
-DISABLED → ENABLED
-```
-
-or
-
-```
-DISABLED → FAULT
-```
-
----
-
-### ENABLED
+### READY
 
 The axis is enabled and capable of accepting motion commands.
 
@@ -891,48 +823,46 @@ Responsibilities
 Transitions
 
 ```
-ENABLED → CONSTANT VELOCITY
+READY → CONSTANT VELOCITY
 ```
 
 or
 
 ```
-ENABLED → POSITION MOTION
+READY → POSITION MOTION
 ```
 
 or
 
 ```
-ENABLED → FAULT
+READY → FAULT
 ```
 
 ---
 
-### CONSTANT VELOCITY
+### HOMING
 
-The axis is executing a continuous velocity command through LinuxCNC.
+The axis is executing a continuous velocity command through LinuxCNC to home the motor. 
 
-This state is primarily used during homing procedures.
-
-Motion continues until an external event, such as a limit switch signal, requests termination.
+Motion continues until a limit switch signal. 
 
 The Motor object does not directly terminate motion. It reports the event and LinuxCNC remains responsible for stopping the commanded motion.
 
 Transitions
 
 ```
-CONSTANT VELOCITY → ENABLED
+HOMING → READY
 ```
 
 or
 
 ```
-CONSTANT VELOCITY → FAULT
+HOMING → FAULT
 ```
 
 ---
 
-### POSITION MOTION
+### MOVING
 
 The axis is executing a position command through LinuxCNC.
 
@@ -949,13 +879,13 @@ The Motor object only monitors LinuxCNC status and determines when the commanded
 Transitions
 
 ```
-POSITION MOTION → ENABLED
+MOVING → READY
 ```
 
 or
 
 ```
-POSITION MOTION → FAULT
+MOVING → FAULT
 ```
 
 ---
@@ -964,7 +894,7 @@ POSITION MOTION → FAULT
 
 The axis has encountered an abnormal condition preventing safe operation.
 
-FAULT is a latched error condition and is separate from DISABLED.
+FAULT is a latched error condition. 
 
 Examples include
 
@@ -987,7 +917,7 @@ Recovery requires an explicit reset procedure.
 Transition
 
 ```
-FAULT → DISABLED
+FAULT → READY
 ```
 
 after fault recovery has been completed.

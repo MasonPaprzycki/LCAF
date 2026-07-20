@@ -1,7 +1,7 @@
 from enum import Enum, auto
 from motor import Motor
 
-from toolpath import ToolpathOperation
+from lcaf.toolpath.toolpath import ToolpathOperation
 import logging
 from typing import Optional
 from linuxcnc_interface import LinuxCNCInterface
@@ -61,8 +61,6 @@ class MotionCoordinator:
 
         self.fault_message = ""
 
-        
-
     def poll(self):
         """
         Poll all motor states.
@@ -98,19 +96,12 @@ class MotionCoordinator:
             if not motor.is_idle():
                 busy_axes.append(name)
 
-
         if busy_axes:
-
-            self.logger.debug(
-                f"Motion busy: axes={busy_axes}"
-            )
+            self.logger.debug(f"Motion busy: axes={busy_axes}")
 
             return False
 
-
-        self.logger.debug(
-            "All axes idle"
-        )
+        self.logger.debug("All axes idle")
 
         return True
 
@@ -120,43 +111,24 @@ class MotionCoordinator:
         Immediately stop all motors.
         """
 
-        self.logger.warning(
-            "EMERGENCY STOP REQUESTED"
-        )
-
+        self.logger.warning("EMERGENCY STOP REQUESTED")
 
         for name, motor in self.axes.items():
-
             try:
-
-                self.logger.warning(
-                    f"Emergency stop axis={name}"
-                )
-
+                self.logger.warning(f"Emergency stop axis={name}")
                 motor.emergency_stop()
 
-
             except Exception as e:
-
-                self.logger.exception(
-                    f"Emergency stop failed: axis={name}, error={e}"
-                )
+                self.logger.exception(f"Emergency stop failed: axis={name}, error={e}")
 
 
         idle = self.all_idle()
 
-
         if idle:
-
-            self.logger.warning(
-                "Emergency stop complete: all axes idle"
-            )
+            self.logger.warning("Emergency stop complete: all axes idle")
 
         else:
-
-            self.logger.error(
-                "Emergency stop incomplete: motors still active"
-            )
+            self.logger.error("Emergency stop incomplete: motors still active")
 
 
         return idle
@@ -169,24 +141,18 @@ class MotionCoordinator:
 
         if axis not in self.axes:
 
-            self.logger.error(
-                f"Invalid axis command: axis={axis}"
-            )
+            self.logger.error(f"Invalid axis command: axis={axis}")
 
-            raise ValueError(
-                f"Unknown axis {axis}"
-            )
+            raise ValueError(f"Unknown axis {axis}")
 
 
         motor = self.axes[axis]
-
 
         self.logger.info(
             f"MOTION COMMAND: "
             f"axis={axis}, "
             f"target={position}"
         )
-
 
         try:
 
@@ -217,35 +183,33 @@ class MotionCoordinator:
         Home all machine axes.
         """
 
-        self.logger.info(
-            "HOMING START: all axes"
-        )
-
+        self.logger.info("HOMING START: all axes")
 
         for name, motor in self.axes.items():
-
             try:
-
-                self.logger.info(
-                    f"HOMING COMMAND: axis={name}"
-                )
-
+                self.logger.info(f"HOMING COMMAND: axis={name}")
                 motor.home()
 
-
             except Exception as e:
-
-                self.logger.exception(
-                    f"HOMING FAILED: axis={name}, error={e}"
-                )
-
+                self.logger.exception(f"HOMING FAILED: axis={name}, error={e}")
                 raise
 
+        self.interface.home_all()
 
-        self.logger.info(
-            "HOMING COMMANDS ISSUED: all axes"
+        self.logger.info( "HOMING COMMANDS ISSUED: all axes")
+
+    def all_homed(self):
+
+        return all(
+            motor.is_homed()
+            for motor in self.axes.values()
         )
 
+    def homing_complete(self):
+        """
+        Check if all axes have completed homing.
+        """
+        return self.interface.all_homed()
 
     def start(self, operation: ToolpathOperation):
 
@@ -278,20 +242,16 @@ class MotionCoordinator:
         if self.state == MotionCoordinatorState.RETRACT_Z:
 
             self.move_axis("z", 0.0)
-
             self.state = MotionCoordinatorState.VERIFY_Z_RETRACTED
 
             return
 
         # Verify Z
         if self.state == MotionCoordinatorState.VERIFY_Z_RETRACTED:
-
             if self.axes["z"].is_idle():
-
                 self.state = MotionCoordinatorState.RETRACT_XY
 
             return
-
 
         # Retract XY
         if self.state == MotionCoordinatorState.RETRACT_XY:
@@ -303,28 +263,18 @@ class MotionCoordinator:
 
             return
 
-
         # Verify XY Retract
         if self.state == MotionCoordinatorState.VERIFY_XY_RETRACTED:
 
-            if (
-                self.axes["x"].is_idle()
-                and
-                self.axes["y"].is_idle()
-            ):
-
+            if (self.axes["x"].is_idle() and self.axes["y"].is_idle() ):
                 self.state = MotionCoordinatorState.ROTATE_A
 
             return
 
-
         # Rotate
         if self.state == MotionCoordinatorState.ROTATE_A:
 
-            self.move_axis(
-                "a",
-                operation.rotation
-            )
+            self.move_axis("a", operation.rotation)
 
             self.state = MotionCoordinatorState.VERIFY_ROTATION
 
@@ -334,7 +284,6 @@ class MotionCoordinator:
         if self.state == MotionCoordinatorState.VERIFY_ROTATION:
 
             if self.axes["a"].is_idle():
-
                 self.state = MotionCoordinatorState.MOVE_XY
 
             return
@@ -342,15 +291,8 @@ class MotionCoordinator:
         # Move XY
         if self.state == MotionCoordinatorState.MOVE_XY:
 
-            self.move_axis(
-                "x",
-                operation.x
-            )
-
-            self.move_axis(
-                "y",
-                operation.y
-            )
+            self.move_axis( "x", operation.x )
+            self.move_axis( "y", operation.y )
 
             self.state = MotionCoordinatorState.VERIFY_XY_POSITION
 
@@ -359,33 +301,21 @@ class MotionCoordinator:
         # Verify XY
         if self.state == MotionCoordinatorState.VERIFY_XY_POSITION:
 
-            if (
-                self.axes["x"].is_idle()
-                and
-                self.axes["y"].is_idle()
-            ):
-
+            if (self.axes["x"].is_idle() and self.axes["y"].is_idle()):
                 self.state = MotionCoordinatorState.MOVE_Z
 
             return
 
         # Move Z
         if self.state == MotionCoordinatorState.MOVE_Z:
-
-            self.move_axis(
-                "z",
-                operation.die_gap
-            )
-
+            self.move_axis( "z", operation.die_gap )
             self.state = MotionCoordinatorState.VERIFY_Z_POSITION
 
             return
 
         # Verify Z 
         if self.state == MotionCoordinatorState.VERIFY_Z_POSITION:
-
             if self.axes["z"].is_idle():
-
                 self.state = MotionCoordinatorState.COMPLETE
 
             return

@@ -2,81 +2,69 @@
 
 ## Overview
 
-The Low Cost Agility Forge (LCAF) software stack is divided into hierarchical control layers.
+        main.py (intitializes and starts controller)
+           |
+           |
+    control/controller.py (telemetry & state machine heartbeat)--------
+           |                                                          |
+           |                                                          |
+telemetry/telemetry.py --> control/forge_brain.py                     |
+                            && adaption/adaptive_planner.py           |
+(publishes telemetry)                                                 |
+                                                                      |
+             adaption/adaptive_planner.py --------------------> forge_brain.py  
+                (provides updated tool path queue)                |
+                                                                  |
+                                                                  |
+                                                        control/motion_coordinator.py
+                                                                  |
+                                                                  |
+                                                            control/motor.py
+                                                                  |
+                                                                  |
+                                                        control/linuxcnc_interface.py
+                              
+--> means publishes data to 
 
-LinuxCNC is responsible for deterministic real-time machine control, this eliminates the need for custom programmed motor drivers and makes this software scaleable and maintainable with other systems. 
+toolpath/toolpath.py contains utils for toolpath and operation path classes used by 
+motioin_coordinator.py forge_brain.py and will be used by adaptive planner.py
 
-ForgeBrain is responsible for high-level manufacturing execution.
+adaption/simulation currently contains MPM and FEM simulations used to represent this forge. It is using JAX-FEM for FEM and Genesis for MPM 
+        
 
-The architecture intentionally separates machine control from manufacturing intelligence.
+# main.py
+intiializes and starts up the entire system 
 
+# controller.py 
+Controls heart beat; initializes publishes and sets up subscribers to telemetry
+Advances the control loop in forge_brain.py
 
-In the diagram below individual files have are denoted with .filetype
-Everything else talks about a purpose a file fills in a high level description 
+# telemetry.py 
+    - Collects sensor and telemetry data 
+    - Publish's telemetry and sensor data to a central channel that all other subsystems can subscribe to 
 
--------------------------------------------------------------------------------
--------------------------------------------------------------------------------
-
-                    (Toolpath execution queue).jsonl  ◀─────────────┐
-                           │                                        |
-                           ▼                                        |
-                    ForgeBrain.py  ─────────────────────▶ Adaptive toolpathing 
-                                                            abstraction layer
-          (Supervisory Manufacturing Controller)
-                           │
-      ┌────────────────────┼────────────────────┐
-      │                    │                    │
-      ▼                    ▼                    ▼
- MotionCoordinator     SensorManager      Telemetry
-      │
-      ▼
-    Motor.py
-      │
-      ▼
-LinuxCNCInterface.py
-      │
-      ▼
- LinuxCNC Python API
-      │
-      ▼
- HAL Pins / INI / Machine Config
-      │
-      ▼
-      Mesa FPGA
-      │
-      ▼
- Servo Drives
-      │
-      ▼
-  Mechanical Forge
-
---------------------------------------------------------------------------------------
---------------------------------------------------------------------------------------
 # forge_brain.py 
  
-Forge brain is the highest level abstraction
+Forge brain is the highest level abstraction of the state machine
 
-It is essentially a giant state machine that ensures the machine listens to our instructions
 
 Responsibilities: 
 
     - Owns the entire machine state 
     - Executes tool path 
-    - Collects sensor and telemetry data 
     - Fault handeling 
-    - Publish's telemetry and sensor data to a central channel that all other subsystems can subscribe to 
+
 
     - Manages Execution queue 
         - Ensures we execute a tool path step by step
 
-        - Leaves one layer of abstraction in the queue state that allows for the collection and processing of sensor data and telemetry. This layer will execute reheating logic and adaptive tool pathing. So once it hits this state if it needs to reheat the system will wait before the next tool path operation and reheat. In adaptive tool pathing there will be another logistical chain that decides how and if the system should change the next or any proceding tool paths. 
-    
-    - Within every tool path we need to retract Z, retract X and Y, apply the rotation A, apply X and Y, and finally apply Z, 
+        - Leaves one layer of abstraction in the queue state ADAPT_OPERATION that pulls an updated queue from adaptive_planner which allows for deterministic adaptive toolpathing 
+ 
 
-# MotionCoordinator
+# motion_coordinator.py
+    - Within every tool path we need to retract Z, retract X and Y, apply the rotation A, apply X and Y, and finally apply Z. MotionCoordinator makes sure we do this 
 
 Responsibilities: 
-
     - Coordinating multi-axis moves
     - Homing
     - Emergency stop requests
@@ -90,7 +78,6 @@ Note: LinuxCNC performs all trajectory planning
 Represents a single machine axis.
 
 Responsibilities: 
-
     - Axis abstraction
     - Axis status
     - Axis command interface
@@ -110,7 +97,6 @@ Responsibilities:
 
 Note: No supervisory logic.
 
-
 # LinuxCNC
 
 Responsibilities: 
@@ -125,27 +111,3 @@ Responsibilities:
     - Following error detection
 
 Note: ForgeBrain never replaces LinuxCNC functionality.
-
-
-# Planned software modules
-
-Already implemented: 
-    - forge_brain.py (supervisory manufacturing controller)
-
-Currently embedded in forge_brain low priority but might deserve own module: 
-    - MotionCoordinator (Multi-Axis Coordination)
-    - SensorManager (Sensor polling)
-    - Telemetry (Publish-subscribe messaging)
-    - ToolPathQueue (JSONL execution queue)
-
-As of yet only partially completed: 
-    - linuxcnc_interface.py (LinuxCNC abstraction)
-    - motor.py (Axis abstraction)
-
-Planned: 
-    - ProcessModel (billet state estimation )
-    - SimulationInterface (FEM/MPM integration with the simulation stuff currently stored in the LowCostAgilityForge repository)
-    - GeometryEngine (Fast geometric prediction)
-
-
-

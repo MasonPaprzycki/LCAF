@@ -2,10 +2,9 @@
 ===============================================================================
 ForgeBrain
 -------------------------------------------------------------------------------
-Highest level abstraction for the forging brain.
+Highest level abstraction for the forging brain. 
 
-Author: Mason Paprzycki 
-Version: 0.1
+It is the the HSFM state machine outlined in docs/state_machine.md
 ===============================================================================
 """
 
@@ -19,30 +18,42 @@ from pathlib import Path
 from enum import Enum, auto
 from typing import List
 from typing import Optional
+from copy import deepcopy
 
 from linuxcnc_interface import LinuxCNCInterface
 from motion_coordinator import MotionCoordinator, MotionCoordinatorState
 
-from toolpath import ToolpathOperation
-from toolpath import OperationType
+from lcaf.toolpath.toolpath import ToolpathOperation
+from lcaf.toolpath.toolpath import OperationType
 
 
 class BrainState(Enum):
 
     INITIALIZING = auto()
     IDLE = auto()
-
     EXECUTE_OPERATION = auto()
 
-    VERIFY_OPERATION = auto()      # verify completed operation and handle book keeping
-
-    ADAPT_OPERATION = auto()       # sensor analysis / adaptive logic
-
+    # verifies expected deformation behavior 
+    # and updates adaptive logic based on sensor analysis
+    ADAPT_OPERATION = auto()  
     COMPLETE_TOOLPATH = auto()
 
     FAULT = auto()
     SHUTDOWN = auto()
 
+class HomingState(Enum):
+
+    NOT_STARTED = auto()
+
+    STARTING = auto()
+
+    HOMING = auto()
+
+    VERIFYING = auto()
+
+    COMPLETE = auto()
+
+    FAULT = auto()
 
 class MotionState(Enum):
 
@@ -67,10 +78,10 @@ class ForgeMode(Enum):
 class SystemState:
 
     # Execution
-    
     toolpath_loaded: bool = False
     brain_state: BrainState = BrainState.INITIALIZING
     forge_mode: ForgeMode = ForgeMode.STARTUP
+    homing_state: HomingState = HomingState.NOT_STARTED
     motion_state: MotionState = MotionState.UNKNOWN
 
     machine_enabled: bool = False
@@ -123,38 +134,13 @@ class ToolpathQueue:
         self.operations.clear()
         self.index = 0
 
-class Telemetry:
+    def clone(self):
 
-    def __init__(self):
-        self.subscribers = {}
+        new = ToolpathQueue()
+        new.operations = deepcopy(self.operations)
+        new.index = self.index
 
-    def subscribe(self, topic, callback):
-
-        if topic not in self.subscribers:
-            self.subscribers[topic] = []
-
-        self.subscribers[topic].append(callback)
-
-    def publish(self, topic, data):
-
-        if topic not in self.subscribers:
-            return
-
-        for callback in self.subscribers[topic]:
-            callback(data)
-
-class SensorManager:
-
-    def __init__(self):
-        self.sensors = []
-
-    def register(self, sensor):
-        self.sensors.append(sensor)
-
-    def update(self):
-        for sensor in self.sensors:
-            sensor.poll()
-
+        return new
 
 class ForgeBrain:
 
@@ -162,7 +148,7 @@ class ForgeBrain:
     High-level autonomous forging controller.
     """
 
-    def __init__(self):
+    def __init__(self, motion, planner):
 
         logging.basicConfig(
             level=logging.INFO,
@@ -172,99 +158,23 @@ class ForgeBrain:
         self.logger = logging.getLogger("ForgeBrain")
 
         self.state = SystemState()
-        self.state.last_update = time.time()
         self.queue = ToolpathQueue()
-        self.telemetry = Telemetry()
-        self.motion = MotionCoordinator()
-        self.sensors = SensorManager()
+
+        self.motion = motion
+        self.planner = planner 
         self.running = False
         self.command_history = []
 
+    def update(self, telemetry):
 
-        # Controller update frequency (Hz)
-        self.update_rate = 50.0
+        self.state.machine_enabled = telemetry.machine_enabled
+        self.state.machine_homed = telemetry.machine_homed
+        self.state.estop = telemetry.estop
+        self.state.motion_state = telemetry.motion_state
+        self.state.billet_temperature = telemetry.billet_temperature
+        self.state.last_update = telemetry.timestamp
 
-        # Controller period (seconds)
-        self.control_period = 1.0 / self.update_rate
-
-        # Number of update cycles executed
-        self.loop_count = 0
-
-    def run(self):
-
-        self.running = True
-
-        self.log_event("ForgeBrain Started")
-
-        while self.running:
-
-            start = time.perf_counter()
-
-            # Poll machine
-            self.update()
-
-            # Execute one state
-            self.process_state_machine()
-
-            # Publish telemetry
-            self.publish()
-
-            # Maintain loop frequency
-            elapsed = time.perf_counter() - start
-
-            sleep = self.control_period - elapsed
-
-            if sleep > 0:
-
-                time.sleep(sleep)
-
-        self.log_event("ForgeBrain Shutdown")
-
-    def update(self):
-
-        """
-        Poll every subsystem once.
-
-        This should execute every controller cycle.
-        """
-
-        self.motion.poll()
-        self.sensors.update()
-
-        self.state.runtime_seconds = (
-            time.time() - self.state.start_time
-        )
-
-        self.state.last_update = time.time()
-        self.loop_count += 1
-
-    def publish(self):
-
-        self.telemetry.publish(
-            "brain",
-            self.state
-        )
-
-        self.telemetry.publish(
-            "motion",
-            self.state.motion_state
-        )
-
-        self.telemetry.publish(
-            "forge",
-            self.state.forge_mode
-        )
-
-    def log_event(self, message):
-        self.state.last_event = message
-        self.logger.info(message)
-
-    def set_fault(self, message):
-        self.state.fault_active = True
-        self.state.fault_message = message
-
-        self.set_brain_state(BrainState.FAULT, f"Fault message: {message}")
-
+        self.motion.update(telemetry)
 
     def process_state_machine(self):
         state = self.state.brain_state
@@ -278,9 +188,6 @@ class ForgeBrain:
         elif state == BrainState.EXECUTE_OPERATION:
             self.execute_operation()
 
-        elif state == BrainState.VERIFY_OPERATION:
-            self.verify_operation()
-
         elif state == BrainState.ADAPT_OPERATION:
             self.adapt_operation()
 
@@ -292,6 +199,15 @@ class ForgeBrain:
 
         elif state == BrainState.SHUTDOWN:
             self.shutdown()
+
+    def log_event(self, message):
+        self.state.last_event = message
+        self.logger.info(message)
+
+    def set_fault(self, message):
+        self.state.fault_active = True
+        self.state.fault_message = message
+        self.set_brain_state(BrainState.FAULT, f"Fault message: {message}")
 
     def set_brain_state(self, state: BrainState, message: str = ""):
         if self.state.brain_state == state:
@@ -338,9 +254,7 @@ class ForgeBrain:
             self.log_event(message)
 
         self.state.forge_mode = mode
-
     
-
         
     def shutdown(self):
         self.running = False
@@ -382,18 +296,10 @@ class ForgeBrain:
                         ],
 
                         x=data.get("x", 0.0),
-
                         y=data.get("y", 0.0),
-
                         die_gap=data.get("die_gap", 0.0),
-
                         rotation=data.get("rotation", 0.0),
-
-                        target_temperature=data.get(
-                            "target_temperature",
-                            0.0
-                        ),
-
+                        target_temperature=data.get("target_temperature",0.0),
                         metadata=data.get("metadata", {})
                     )
 
@@ -409,9 +315,7 @@ class ForgeBrain:
 
         self.state.current_step = 0
 
-        self.log_event(
-            f"Loaded {len(self.queue.operations)} operations."
-        )
+        self.log_event(f"Loaded {len(self.queue.operations)} operations.")
 
 
     def initialize_machine(self):
@@ -436,17 +340,8 @@ class ForgeBrain:
         if not interface.all_homed():
 
             if self.state.motion_state != MotionState.MOVING:
-
-                self.log_event(
-                    "Homing machine"
-                )
-
                 self.motion.home_all()
-
-                self.set_motion_state(
-                    MotionState.MOVING,
-                    "Homing in progress"
-                )
+                self.set_motion_state(MotionState.MOVING, "Homing in progress")
 
             return
 
@@ -463,11 +358,7 @@ class ForgeBrain:
         self.set_forge_mode(ForgeMode.WAITING)
         self.set_motion_state(MotionState.READY)
 
-        self.set_brain_state(BrainState.EXECUTE_OPERATION)
-
-        self.log_event(
-            "Starting toolpath execution"
-        )
+        self.set_brain_state(BrainState.EXECUTE_OPERATION,"Starting toolpath execution")
 
     def execute_operation(self):
 
@@ -482,9 +373,7 @@ class ForgeBrain:
         operation = self.queue.current()
 
         if operation is None:
-            self.set_fault(
-                "Toolpath queue returned no operation."
-            )
+            self.set_fault("Toolpath queue returned no operation.")
             return
         
         # Start the Motion Coordinator exactly once.
@@ -507,98 +396,37 @@ class ForgeBrain:
 
             self.motion.reset()
 
-            self.set_brain_state(
-                BrainState.VERIFY_OPERATION
-            )
+            interface = self.motion.interface
+            interface.update()
 
-    def verify_operation(self):
+            if interface.estop():
+                self.set_fault("Machine entered ESTOP")
+                return
 
-        operation = self.queue.current()
+            if not interface.machine_on():
+                self.set_fault("Machine disabled")
+                return
 
-        if operation is None:
-            self.set_fault("No operation to verify")
-            return
+            self.queue.advance()
+            self.state.completed_steps += 1
+            self.command_history.append(operation)
+            self.log_event(f"Executed operation {operation.step}")
 
-        #
-        # TODO:
-        #
-        # Verify none of the motors skipped steps
-        # Check for any other machine faults
-
-        interface = self.motion.interface
-        interface.update()
-
-        if interface.estop():
-            self.set_fault("Machine entered ESTOP")
-            return
-
-        if not interface.machine_on():
-            self.set_fault("Machine disabled")
-            return
-
-        self.queue.advance()
-
-        self.state.completed_steps += 1
-
-        self.command_history.append(operation)
-
-        self.log_event(
-            f"Verified operation {operation.step}"
-        )
-
-        self.set_brain_state(BrainState.ADAPT_OPERATION)
-
+            self.set_brain_state(BrainState.ADAPT_OPERATION)
 
     def adapt_operation(self):
-
-        """
-        Adaptive manufacturing stage.
-
-        At the end of the function it modifies the tool path queue.
-        The modifications are based on the analysis of the current operation and the state of the machine.
-        If it needs to reheat it will insert a reheat operation into the tool path queue. 
-        If it needs to modify the tool path it will simply change the next or any following tool paths in the queue.
-
-        Future responsibilities:
-            • Thermal camera processing
-            • 3D scan analysis
-            • Die separation measurement
-            • Load cell analysis
-            • Billet temperature estimation
-            • Adaptive reheating
-            • Adaptive strike planning
-            • Toolpath modification
-            • AI decision making
-        """
-
-        #
-        # Future:
-        #
-        # self.read_sensors()
-        #
-        # self.analyze_part()
-        #
-        # self.update_process_model()
-        #
-        # self.modify_remaining_toolpath()
-        #
-        # self.schedule_reheat()
-        #
+        self.queue = self.planner.adapt(self.queue)
 
         self.set_brain_state(BrainState.EXECUTE_OPERATION)
 
-    
     def complete_toolpath(self):
         self.set_forge_mode(ForgeMode.COMPLETE)
         self.set_motion_state(MotionState.READY, "Toolpath complete")
 
         self.set_brain_state(BrainState.IDLE)
-        
 
     def handle_fault(self):
-        self.log_event(
-            f"FAULT: {self.state.fault_message}"
-        )
+        self.log_event( f"FAULT: {self.state.fault_message}")
 
         self.motion.emergency_stop()
         self.running = False

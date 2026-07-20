@@ -1,51 +1,7 @@
-"""
-===============================================================================
-linuxcnc_interface.py
--------------------------------------------------------------------------------
-
-Thin LinuxCNC abstraction layer.
-
-Responsibilities
-----------------
-- Read LinuxCNC machine state
-- Read axis state
-- Execute MDI motion
-- Execute homing
-- Read/write HAL pins
-- Read LinuxCNC error channel
-
-NO control logic.
-
-NO state machine.
-
-NO motion planning.
-
-ForgeBrain
-      │
-      ▼
-MotionCoordinator
-      │
-      ▼
-Motor
-      │
-      ▼
-LinuxCNCInterface
-      │
-      ├── linuxcnc.command()
-      ├── linuxcnc.stat()
-      ├── linuxcnc.error_channel()
-      └── HAL
-
-Author: Mason Paprzycki 
-Version: 0.1
-===============================================================================
-"""
-
 from __future__ import annotations
 
 import linuxcnc
 import hal
-
 
 class LinuxCNCInterface:
 
@@ -55,10 +11,8 @@ class LinuxCNCInterface:
         self.status = linuxcnc.stat()
         self.error = linuxcnc.error_channel()
 
-        #
         # Default limit switch HAL pins
-        # Change these to match your machine configuration.
-        #
+        # Change these to match machine configuration.
 
         self.limit_pins = {
 
@@ -131,11 +85,11 @@ class LinuxCNCInterface:
         return self.status.inpos
 
     #homing
-
     def home_axis(self, joint):
         self.command.mode(linuxcnc.MODE_MANUAL)
         self.command.wait_complete()
         self.command.home(joint)
+        #no wait_complete here
 
     def home_all(self):
         self.command.mode(linuxcnc.MODE_MANUAL)
@@ -163,8 +117,8 @@ class LinuxCNCInterface:
 
         self.command.mode(linuxcnc.MODE_MDI)
         self.command.wait_complete()
-
         self.command.mdi(mdi)
+        #no wait_complete here
 
     def move_axis(self,
                   axis: str,
@@ -175,12 +129,7 @@ class LinuxCNCInterface:
 
         self.execute_mdi(mdi)
 
-    def move_axes(self,
-                  x=None,
-                  y=None,
-                  z=None,
-                  a=None,
-                  feed=1000):
+    def move_axes(self, x=None, y=None, z=None, a=None, feed=1000):
 
         mdi = "G1 "
 
@@ -200,14 +149,11 @@ class LinuxCNCInterface:
 
         self.execute_mdi(mdi)
 
-
     def dwell(self, seconds):
-
         self.execute_mdi(f"G4 P{seconds}")
 
    #Hal read 
     def read_pin(self, pin_name):
-
         return hal.get_value(pin_name)
 
     def read_pins(self, pins):
@@ -221,42 +167,56 @@ class LinuxCNCInterface:
 
     #Hal write 
     def write_pin(self, pin_name, value):
-
         hal.set_p(pin_name, str(value))
 
     # Limit switches 
     def limit_min(self, joint):
-
         return self.read_pin(
             self.limit_pins[joint]["min"]
         )
 
     def limit_max(self, joint):
-
         return self.read_pin(
             self.limit_pins[joint]["max"]
         )
 
     def limits(self, joint):
-
         return {
-
             "min": self.limit_min(joint),
-
             "max": self.limit_max(joint)
-
         }
     
     #hal helpers 
-    def read_axis_pin(self,
-                      joint,
-                      pin_suffix):
-
+    def read_axis_pin(self, joint, pin_suffix):
         pin = f"joint.{joint}.{pin_suffix}"
 
         return self.read_pin(pin)
 
-    # error channel 
-    def get_error(self):
+    def get_errors(self):
+        errors = []
 
-        return self.error.poll()
+        while True:
+            error = self.error.poll()
+
+            if error is None:
+                break
+
+            errors.append(error)
+
+        return errors
+    
+    def homing_error(self):
+
+        errors = self.get_errors()
+
+        for error in errors:
+
+            if error is None:
+                continue
+
+            text = str(error).lower()
+
+            if "home" in text:
+                return error
+
+        return None
