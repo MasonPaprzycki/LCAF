@@ -1,7 +1,4 @@
-import logging
-from pathlib import Path
-
-from control.controller import Controller
+from lcaf.control.controller import Controller
 
 def main():
     controller = Controller()

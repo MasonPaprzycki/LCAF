@@ -1,10 +1,18 @@
 #########################################################################
-# GENESIS 1.1 FORGING SIMULATION  –  v5  (CLEAN REMESH)
+# GENESIS 1.1 FORGING SIMULATION  
+##########################################################################
 # Designed for constant temperature hot billet upset between punch and anvil
-# Variable temperature feedback would need an updated architecture 
+# Variable temperature feedback would need an updated architecture. 
 #
-# Introduced re meshing to avoid instability from excited particles
+# This is a very slow and computationally expensive simulation process. 
+# To run reasonably on a average work station we needed to use a pretty low resolution. 
 #
+# Further more, forging temperature steel is still very stiff and the numerical complexity is quite high
+# We ran into large instability issues where the simulation would blow up.
+# So we introduced a remeshing strategy to avoid instability from excited particles.
+# This is only a concern during very large deformation though. 
+# 
+# Also note that this simulation is yet to be experimentally validated.
 #
 ##### BUG HISTORY #######################################################
 #
@@ -17,13 +25,7 @@
 # BUG 2 (v2 attempt): gs.morphs.Box + gs.materials.Tool()
 #   Tool material ALSO requires a Mesh morph, not Box.
 #   ToolEntity.__init__ calls morph.scale which Box does not
-#   expose → AttributeError: 'Box' object has no attribute
-#   'scale' → crash before scene.build().
-#
-# FIX (v3): generate OBJ files for punch and anvil
-#   programmatically at startup, then use gs.morphs.Mesh
-#   pointing at those OBJ files with gs.materials.Tool.
-#   Tool+Mesh is the canonical Genesis kinematic MPM coupler.
+#   expose → AttributeError: 'Box' object has no attribute#   'scale' → crash before scene.build().
 #
 # BUG 3: Billet must start levitated above the interface of the
 #   anvil by a distance of about half a particle. Otherwise at
@@ -35,13 +37,7 @@
 #   inside BilletState.compute_setdown_center_z() and
 #   remesh_scene() so it can never be forgotten.
 #
-# BUG 5 (v3→v4): cell_size was computed TWICE (once before
-#   scene.build and once after) with different formulas.
-#   The second (post-build) formula used domain width / grid
-#   density which is correct; the first was dead code.
-#   FIX: single authoritative cell_size computed post-build.
-#
-# BUG 6 (v4→v5): gs.init() raises GenesisException("Genesis
+# BUG 4 (v4→v5): gs.init() raises GenesisException("Genesis
 #   already initialized.") on every remesh after the first
 #   because Genesis 1.1 is NOT idempotent across calls to
 #   gs.init() within a single Python process.
@@ -51,7 +47,7 @@
 #   destroy is only issued when actually needed.
 #
 #
-# ####### Remeshing design (v5)#############################
+# ####### Remeshing design ####################################
 #   Remeshing tears down the Genesis scene completely and
 #   starts a brand-new simulation with fresh particle state.
 #   The current DEFORMED GEOMETRY is preserved by sizing the
@@ -169,16 +165,6 @@ for d in (
 #units and geometry 
 INCH = 0.0254
 
-
-# ###############################################################
-# GENESIS LIFECYCLE MANAGEMENT
-# ################################################################
-# Genesis 1.1 raises GenesisException("Genesis already
-# initialized.") if gs.init() is called a second time in the
-# same Python process (BUG 6).  gs_init_fresh() resolves this
-# by calling gs.destroy() first whenever Genesis is live, then
-# calling gs.init().  A module-level flag tracks live state.
-# ################################################################
 _genesis_initialized: bool = False   # module-level liveness flag
 
 

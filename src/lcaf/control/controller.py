@@ -2,8 +2,8 @@ import time
 
 from lcaf.telemetry.telemetry import Telemetry, SensorManager, TelemetrySnapshot
 from lcaf.adaption.adaptive_planner import AdaptivePlanner
-from motion_coordinator import MotionCoordinator 
-from forge_brain import ForgeBrain
+from lcaf.control.motion_coordinator import MotionCoordinator 
+from lcaf.control.forge_brain import ForgeBrain
 
 class Controller:
 

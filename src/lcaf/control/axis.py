@@ -7,7 +7,7 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import Optional
 
-from linuxcnc_interface import LinuxCNCInterface
+from lcaf.control.linuxcnc_interface import LinuxCNCInterface
 
 class AxisState(Enum):
     UNKNOWN = auto()
@@ -34,7 +34,7 @@ class AxisStatus:
     state: AxisState = AxisState.UNKNOWN
     last_update: float = field(default_factory=time.time)
 
-class Motor:
+class Axis:
 
     def __init__(self, axis_name: str, joint: int, interface: LinuxCNCInterface):
         self.axis = axis_name

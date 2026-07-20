@@ -13,10 +13,10 @@ ForgeBrain                      AdaptativePlanner
     │                                   |
     ├── Motion Coordinator              |
     │       │                           |
-    │       ├── Motor X                 |
-    │       ├── Motor Y                 |
-    │       ├── Motor Z                 |
-    │       └── Motor A                 |
+    │       ├── Axis X                  |
+    │       ├── Axis Y                  |
+    │       ├── Axis Z                  |
+    │       └── Axis  A                 |
     │                                   |
     ├── Toolpath Queue ─────────────────┘
     │   ForgeBrain calls adapt() to to pull the adapted execution queue 
@@ -48,7 +48,7 @@ Pull Sensor States
 
 ↓
 
-Pull from Motion Coordinator which pulls motor states and diagnostics from linuxcnc 
+Pull from Motion Coordinator which pulls axis states and diagnostics from linuxcnc 
 
 ↓
 
@@ -743,13 +743,13 @@ while delegating all actual motion execution to LinuxCNC.
 ---
 # Motor State Machine
 
-Every machine axis owns an independent Motor object.
+Every machine axis owns an independent Axis object.
 
-The Motor class is **not** an independent controller.
+The Axis class is **not** an independent controller.
 
 It exists solely as an abstraction of a single machine axis and executes commands delegated by the Motion Coordinator.
 
-Each Motor maintains its own operational state.
+Each Axis maintains its own operational state.
 
 ```
                      UNINITIALIZED
@@ -793,7 +793,7 @@ Any Operational State
 
 ### UNINITIALIZED
 
-The Motor object has been created but has not yet established communication with LinuxCNC.
+The Axis object has been created but has not yet established communication with LinuxCNC.
 
 Responsibilities
 
@@ -842,11 +842,11 @@ READY → FAULT
 
 ### HOMING
 
-The axis is executing a continuous velocity command through LinuxCNC to home the motor. 
+The axis is executing a continuous velocity command through LinuxCNC to home the axis. 
 
 Motion continues until a limit switch signal. 
 
-The Motor object does not directly terminate motion. It reports the event and LinuxCNC remains responsible for stopping the commanded motion.
+The Axis object does not directly terminate motion. It reports the event and LinuxCNC remains responsible for stopping the commanded motion.
 
 Transitions
 
@@ -874,7 +874,7 @@ LinuxCNC remains responsible for
 - velocity limiting
 - following error detection
 
-The Motor object only monitors LinuxCNC status and determines when the commanded motion has completed.
+The Axis object only monitors LinuxCNC status and determines when the commanded motion has completed.
 
 Transitions
 
@@ -924,9 +924,9 @@ after fault recovery has been completed.
 
 ---
 
-The Motor state machine never performs trajectory generation or real-time control.
+The Axis state machine never performs trajectory generation or real-time control.
 
-All motion execution is delegated to LinuxCNC, while the Motor object serves only as an abstraction of axis state, command routing, and fault reporting.
+All motion execution is delegated to LinuxCNC, while the Axis object serves only as an abstraction of axis state, command routing, and fault reporting.
 
 ---
 
@@ -945,7 +945,7 @@ Motion Coordinator
 
 ↓
 
-Motor
+Axis
 
 ↓
 
@@ -974,7 +974,7 @@ LinuxCNC remains the sole owner of
 - following error detection
 - deterministic real-time execution
 
-The Motor object never commands hardware directly. Every motion request is delegated through the LinuxCNC Interface.
+The Axis object never commands hardware directly. Every motion request is delegated through the LinuxCNC Interface.
 
 ---
 
@@ -989,7 +989,7 @@ ForgeBrain
 Motion Coordinator
         │
         ▼
-      Motor
+      Axis
         │
         ▼
 LinuxCNC Interface
@@ -1034,6 +1034,6 @@ Move X/Y
 Move Z
 ```
 
-while each Motor object is responsible only for representing the operational state of a single axis and forwarding commands to LinuxCNC.
+while each Axis object is responsible only for representing the operational state of a single axis and forwarding commands to LinuxCNC.
 
 This separation of responsibilities guarantees deterministic execution, simplifies debugging, and provides a stable foundation for future sensor integration, adaptive process control, digital twins, FEM/MPM simulation, and autonomous forging algorithms without modifying the underlying machine control architecture.

@@ -20,11 +20,11 @@ from typing import List
 from typing import Optional
 from copy import deepcopy
 
-from linuxcnc_interface import LinuxCNCInterface
-from motion_coordinator import MotionCoordinator, MotionCoordinatorState
+from lcaf.control.linuxcnc_interface import LinuxCNCInterface
+from lcaf.control.motion_coordinator import MotionCoordinator, MotionCoordinatorState
 
-from lcaf.toolpath.toolpath import ToolpathOperation
-from lcaf.toolpath.toolpath import OperationType
+from lcaf.utils.toolpath import ToolpathOperation
+from lcaf.utils.toolpath import OperationType
 
 
 class BrainState(Enum):

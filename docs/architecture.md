@@ -19,15 +19,15 @@ telemetry/telemetry.py --> control/forge_brain.py                     |
                                                         control/motion_coordinator.py
                                                                   |
                                                                   |
-                                                            control/motor.py
+                                                            control/axis.py
                                                                   |
                                                                   |
                                                         control/linuxcnc_interface.py
                               
 --> means publishes data to 
 
-toolpath/toolpath.py contains utils for toolpath and operation path classes used by 
-motioin_coordinator.py forge_brain.py and will be used by adaptive planner.py
+utils/toolpath.py contains utils for toolpath and operation path classes used by 
+motion_coordinator.py forge_brain.py and will be used by adaptive planner.py
 
 adaption/simulation currently contains MPM and FEM simulations used to represent this forge. It is using JAX-FEM for FEM and Genesis for MPM 
         
@@ -68,12 +68,12 @@ Responsibilities:
     - Coordinating multi-axis moves
     - Homing
     - Emergency stop requests
-    - Polling motor state
+    - Polling axis state
     - Does not perform trajectory generation
 
 Note: LinuxCNC performs all trajectory planning
 
-# Motor
+# Axis
 
 Represents a single machine axis.
 

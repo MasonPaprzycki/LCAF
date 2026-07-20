@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from threading import Lock
 
-from lcaf.toolpath.toolpath import ToolpathOperation
+from lcaf.utils.toolpath import ToolpathOperation
 
 class AdaptivePlanner:
     """

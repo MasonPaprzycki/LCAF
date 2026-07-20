@@ -1,10 +1,10 @@
 from enum import Enum, auto
-from motor import Motor
-
-from lcaf.toolpath.toolpath import ToolpathOperation
 import logging
 from typing import Optional
-from linuxcnc_interface import LinuxCNCInterface
+
+from lcaf.utils.toolpath import ToolpathOperation
+from lcaf.control.linuxcnc_interface import LinuxCNCInterface
+from lcaf.control.axis import Axis
 
 class MotionCoordinatorState(Enum):
 
@@ -47,10 +47,10 @@ class MotionCoordinator:
         self.interface = LinuxCNCInterface()
     
         self.axes = {
-            "x": Motor("x", 0, self.interface),
-            "y": Motor("y", 1, self.interface),
-            "z": Motor("z", 2, self.interface),
-            "a": Motor("a", 3, self.interface)
+            "x": Axis("x", 0, self.interface),
+            "y": Axis("y", 1, self.interface),
+            "z": Axis("z", 2, self.interface),
+            "a": Axis("a", 3, self.interface)
         }
 
         self.state = MotionCoordinatorState.IDLE
