@@ -13,14 +13,20 @@ class MotionCoordinatorState(Enum):
     RETRACT_Z = auto()
     VERIFY_Z_RETRACTED = auto()
 
-    RETRACT_XY = auto()
-    VERIFY_XY_RETRACTED = auto()
+    RETRACT_Y = auto()
+    VERIFY_Y_RETRACTED = auto()
+
+    RETRACT_X = auto()
+    VERIFY_X_RETRACTED = auto()
 
     ROTATE_A = auto()
     VERIFY_ROTATION = auto()
 
-    MOVE_XY = auto()
-    VERIFY_XY_POSITION = auto()
+    MOVE_X = auto()
+    VERIFY_X_POSITION = auto()
+
+    MOVE_Y = auto()
+    VERIFY_Y_POSITION = auto()
 
     MOVE_Z = auto()
     VERIFY_Z_POSITION = auto()
@@ -231,6 +237,7 @@ class MotionCoordinator:
         self.command_sent = False
         self.state = MotionCoordinatorState.IDLE
 
+
     def update(self):
 
         if self.active_operation is None:
@@ -246,27 +253,43 @@ class MotionCoordinator:
 
             return
 
-        # Verify Z
+        # Verify Z retracted
         if self.state == MotionCoordinatorState.VERIFY_Z_RETRACTED:
-            if self.axes["z"].is_idle():
-                self.state = MotionCoordinatorState.RETRACT_XY
+            if self.all_idle():  
+                self.state = MotionCoordinatorState.RETRACT_Y
 
             return
 
-        # Retract XY
-        if self.state == MotionCoordinatorState.RETRACT_XY:
+        # Retract Y
+        if self.state == MotionCoordinatorState.RETRACT_Y:
 
-            self.move_axis("x", 0.0)
             self.move_axis("y", 0.0)
 
-            self.state = MotionCoordinatorState.VERIFY_XY_RETRACTED
+            self.state = MotionCoordinatorState.VERIFY_Y_RETRACTED
 
             return
 
-        # Verify XY Retract
-        if self.state == MotionCoordinatorState.VERIFY_XY_RETRACTED:
+        # Verify Y Retracted
+        if self.state == MotionCoordinatorState.VERIFY_Y_RETRACTED:
 
-            if (self.axes["x"].is_idle() and self.axes["y"].is_idle() ):
+            if self.all_idle():
+                self.state = MotionCoordinatorState.RETRACT_X
+
+            return
+        
+         # Retract X
+        if self.state == MotionCoordinatorState.RETRACT_X:
+
+            self.move_axis("x", 0.0)
+
+            self.state = MotionCoordinatorState.VERIFY_X_RETRACTED
+
+            return
+
+        # Verify X Retract
+        if self.state == MotionCoordinatorState.VERIFY_X_RETRACTED:
+
+            if self.all_idle():
                 self.state = MotionCoordinatorState.ROTATE_A
 
             return
@@ -283,25 +306,42 @@ class MotionCoordinator:
         # Verify Rotation
         if self.state == MotionCoordinatorState.VERIFY_ROTATION:
 
-            if self.axes["a"].is_idle():
-                self.state = MotionCoordinatorState.MOVE_XY
+            if self.all_idle():
+                self.state = MotionCoordinatorState.MOVE_X
 
             return
 
-        # Move XY
-        if self.state == MotionCoordinatorState.MOVE_XY:
+        # Move X
+        if self.state == MotionCoordinatorState.MOVE_X:
 
             self.move_axis( "x", operation.x )
-            self.move_axis( "y", operation.y )
 
-            self.state = MotionCoordinatorState.VERIFY_XY_POSITION
+            self.state = MotionCoordinatorState.VERIFY_X_POSITION
 
             return
 
-        # Verify XY
-        if self.state == MotionCoordinatorState.VERIFY_XY_POSITION:
+        # Verify X
+        if self.state == MotionCoordinatorState.VERIFY_X_POSITION:
 
-            if (self.axes["x"].is_idle() and self.axes["y"].is_idle()):
+            if self.all_idle():
+                self.state = MotionCoordinatorState.MOVE_Y
+
+            return
+        
+        
+        # Move Y
+        if self.state == MotionCoordinatorState.MOVE_Y:
+
+            self.move_axis( "y", operation.y )
+
+            self.state = MotionCoordinatorState.VERIFY_Y_POSITION
+
+            return
+
+        # Verify Y
+        if self.state == MotionCoordinatorState.VERIFY_Y_POSITION:
+
+            if self.all_idle():
                 self.state = MotionCoordinatorState.MOVE_Z
 
             return

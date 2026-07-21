@@ -123,17 +123,25 @@ EXECUTE_OPERATION
 │   ↓                                       │
 │ VERIFY_Z_RETRACTED                        │
 │   ↓                                       │
-│ RETRACT_XY                                │
+│ RETRACT_Y                                 │
+│   ↓                                       |
+| VERIFY_Y_RETRACTED                        │
+│   ↓                                       |
+│ RETRACT_X                                 │
 │   ↓                                       │
-│ VERIFY_XY_RETRACTED                       │
+│ VERIFY_X_RETRACTED                        │
 │   ↓                                       │
 │ ROTATE_A                                  │
 │   ↓                                       │
 │ VERIFY_ROTATION                           │
 │   ↓                                       │
-│ MOVE_XY                                   │
+│ MOVE_X                                   │
 │   ↓                                       │
-│ VERIFY_XY_POSITION                        │
+│ VERIFY_X_POSITION 
+|   ↓ 
+│ MOVE_Y                                   │
+│   ↓                                       │
+│ VERIFY_Y_POSITION                      │
 │   ↓                                       │
 │ MOVE_Z                                    │
 │   ↓                                       │
