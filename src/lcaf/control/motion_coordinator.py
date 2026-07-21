@@ -35,7 +35,6 @@ class MotionCoordinatorState(Enum):
 
     FAULT = auto()
 
-
 class MotionCoordinator:
 
     """
