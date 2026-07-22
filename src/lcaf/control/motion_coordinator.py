@@ -3,7 +3,7 @@ import logging
 from typing import Optional
 
 from lcaf.utils.toolpath import ToolpathOperation
-from lcaf.control.linuxcnc_interface import LinuxCNCInterface
+from lcaf.control.linuxcnc_interface import LinuxCNCAxialInterface
 from lcaf.control.axis import Axis
 
 class MotionCoordinatorState(Enum):
@@ -48,14 +48,12 @@ class MotionCoordinator:
 
     def __init__(self):
         self.logger = logging.getLogger("ForgeBrain.Motion")
-
-        self.interface = LinuxCNCInterface()
     
         self.axes = {
-            "x": Axis("x", 0, self.interface),
-            "y": Axis("y", 1, self.interface),
-            "z": Axis("z", 2, self.interface),
-            "a": Axis("a", 3, self.interface)
+            "x": Axis("x", 0),
+            "y": Axis("y", 1),
+            "z": Axis("z", 2),
+            "a": Axis("a", 3)
         }
 
         self.state = MotionCoordinatorState.IDLE
@@ -75,15 +73,15 @@ class MotionCoordinator:
         inside Motor.poll().
         """
 
-        for name, motor in self.axes.items():
+        for name, axis in self.axes.items():
 
             try:
-                motor.poll()
+                axis.poll()
 
             except Exception as e:
 
                 self.logger.exception(
-                    f"Motor poll failure: axis={name}, error={e}"
+                    f"Axis poll failure: axis={name}, error={e}"
                 )
 
                 raise
@@ -96,9 +94,9 @@ class MotionCoordinator:
 
         busy_axes = []
 
-        for name, motor in self.axes.items():
+        for name, axis in self.axes.items():
 
-            if not motor.is_idle():
+            if not axis.is_idle():
                 busy_axes.append(name)
 
         if busy_axes:
@@ -109,34 +107,16 @@ class MotionCoordinator:
         self.logger.debug("All axes idle")
 
         return True
+    
+    def is_axis_in_position(self, axis: str, position: float):
+        if axis not in self.axes:
+            self.logger.error(f"Invalid axis command: axis={axis}")
+            raise ValueError(f"Unknown axis {axis}")
 
-
-    def emergency_stop(self):
-        """
-        Immediately stop all motors.
-        """
-
-        self.logger.warning("EMERGENCY STOP REQUESTED")
-
-        for name, motor in self.axes.items():
-            try:
-                self.logger.warning(f"Emergency stop axis={name}")
-                motor.emergency_stop()
-
-            except Exception as e:
-                self.logger.exception(f"Emergency stop failed: axis={name}, error={e}")
-
-
-        idle = self.all_idle()
-
-        if idle:
-            self.logger.warning("Emergency stop complete: all axes idle")
-
+        if self.axes[axis].position() == position:
+            return True
         else:
-            self.logger.error("Emergency stop incomplete: motors still active")
-
-
-        return idle
+            return False
 
 
     def move_axis(self, axis: str, position: float):
@@ -151,8 +131,6 @@ class MotionCoordinator:
             raise ValueError(f"Unknown axis {axis}")
 
 
-        motor = self.axes[axis]
-
         self.logger.info(
             f"MOTION COMMAND: "
             f"axis={axis}, "
@@ -161,8 +139,7 @@ class MotionCoordinator:
 
         try:
 
-            motor.move_to(position)
-
+            self.axes[axis].move(position)
 
             self.logger.info(
                 f"MOTION ACCEPTED: "
@@ -199,7 +176,8 @@ class MotionCoordinator:
                 self.logger.exception(f"HOMING FAILED: axis={name}, error={e}")
                 raise
 
-        self.interface.home_all()
+        for name, axis in self.axes.items():
+            axis.home()
 
         self.logger.info( "HOMING COMMANDS ISSUED: all axes")
 
@@ -214,7 +192,11 @@ class MotionCoordinator:
         """
         Check if all axes have completed homing.
         """
-        return self.interface.all_homed()
+        for name, axis in self.axes.items():
+            if not axis.is_homed():
+                return False
+
+        return True
 
     def start(self, operation: ToolpathOperation):
 
@@ -236,7 +218,6 @@ class MotionCoordinator:
         self.command_sent = False
         self.state = MotionCoordinatorState.IDLE
 
-
     def update(self):
 
         if self.active_operation is None:
@@ -246,7 +227,6 @@ class MotionCoordinator:
 
         # Retract Z
         if self.state == MotionCoordinatorState.RETRACT_Z:
-
             self.move_axis("z", 0.0)
             self.state = MotionCoordinatorState.VERIFY_Z_RETRACTED
 
@@ -254,75 +234,63 @@ class MotionCoordinator:
 
         # Verify Z retracted
         if self.state == MotionCoordinatorState.VERIFY_Z_RETRACTED:
-            if self.all_idle():  
+            if self.is_axis_in_position("z", 0.0) and self.all_idle():
                 self.state = MotionCoordinatorState.RETRACT_Y
 
             return
 
         # Retract Y
         if self.state == MotionCoordinatorState.RETRACT_Y:
-
             self.move_axis("y", 0.0)
-
             self.state = MotionCoordinatorState.VERIFY_Y_RETRACTED
 
             return
 
         # Verify Y Retracted
         if self.state == MotionCoordinatorState.VERIFY_Y_RETRACTED:
-
-            if self.all_idle():
+            if self.is_axis_in_position("y", 0.0) and self.all_idle():
                 self.state = MotionCoordinatorState.RETRACT_X
 
             return
         
          # Retract X
         if self.state == MotionCoordinatorState.RETRACT_X:
-
             self.move_axis("x", 0.0)
-
             self.state = MotionCoordinatorState.VERIFY_X_RETRACTED
 
             return
 
         # Verify X Retract
         if self.state == MotionCoordinatorState.VERIFY_X_RETRACTED:
-
-            if self.all_idle():
+            if self.is_axis_in_position("x", 0.0) and self.all_idle():
                 self.state = MotionCoordinatorState.ROTATE_A
 
             return
 
         # Rotate
         if self.state == MotionCoordinatorState.ROTATE_A:
-
             self.move_axis("a", operation.rotation)
-
             self.state = MotionCoordinatorState.VERIFY_ROTATION
 
             return
 
         # Verify Rotation
         if self.state == MotionCoordinatorState.VERIFY_ROTATION:
-
-            if self.all_idle():
+            if self.is_axis_in_position("a", operation.rotation) and self.all_idle():
                 self.state = MotionCoordinatorState.MOVE_X
 
             return
 
         # Move X
         if self.state == MotionCoordinatorState.MOVE_X:
-
             self.move_axis( "x", operation.x )
-
             self.state = MotionCoordinatorState.VERIFY_X_POSITION
 
             return
 
         # Verify X
         if self.state == MotionCoordinatorState.VERIFY_X_POSITION:
-
-            if self.all_idle():
+            if self.is_axis_in_position("x", operation.x) and self.all_idle():
                 self.state = MotionCoordinatorState.MOVE_Y
 
             return
@@ -330,17 +298,14 @@ class MotionCoordinator:
         
         # Move Y
         if self.state == MotionCoordinatorState.MOVE_Y:
-
             self.move_axis( "y", operation.y )
-
             self.state = MotionCoordinatorState.VERIFY_Y_POSITION
 
             return
 
         # Verify Y
         if self.state == MotionCoordinatorState.VERIFY_Y_POSITION:
-
-            if self.all_idle():
+            if self.is_axis_in_position("y", operation.y) and self.all_idle():
                 self.state = MotionCoordinatorState.MOVE_Z
 
             return
@@ -354,9 +319,27 @@ class MotionCoordinator:
 
         # Verify Z 
         if self.state == MotionCoordinatorState.VERIFY_Z_POSITION:
-            if self.axes["z"].is_idle():
+            if self.is_axis_in_position("z", operation.die_gap) and self.all_idle():
                 self.state = MotionCoordinatorState.COMPLETE
 
             return
 
+    def is_motion_enabled(self):
+        for name, axis in self.axes.items():
+            if axis.is_enabled():
+                return True
+
+        return False
     
+    def estop(self):
+        for name, axis in self.axes.items():
+            axis.estop()
+
+        logging.log(logging.INFO, "EMERGENCY STOP ACTIVATED")
+
+    def is_estop_active(self):
+        for name, axis in self.axes.items():
+            if not axis.is_estop_active():
+                return False
+
+        return True

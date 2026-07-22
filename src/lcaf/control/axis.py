@@ -7,14 +7,13 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import Optional
 
-from lcaf.control.linuxcnc_interface import LinuxCNCInterface
+from lcaf.control.linuxcnc_interface import LinuxCNCAxialInterface
 
 class AxisState(Enum):
-    UNKNOWN = auto()
+    UNINITIALIZED = auto()
     READY = auto()
     MOVING = auto()
     HOMING = auto()
-    COMPLETE = auto()
     FAULT = auto()
     ESTOP = auto()
 
@@ -23,100 +22,102 @@ class AxisState(Enum):
 class AxisStatus:
 
     axis: str
-    position: float = 0.0
-    commanded_position: float = 0.0
-    velocity: float = 0.0
-    homed: bool = False
-    enabled: bool = False
-    moving: bool = False
     fault: bool = False
-    in_position: bool = False
-    state: AxisState = AxisState.UNKNOWN
+    state: AxisState = AxisState.UNINITIALIZED
     last_update: float = field(default_factory=time.time)
 
 class Axis:
 
-    def __init__(self, axis_name: str, joint: int, interface: LinuxCNCInterface):
-        self.axis = axis_name
-        self.joint = joint
-        self.interface = interface
+    def __init__(self, axis: str, hal_joint: int):
+        self.axis = axis
+        self.joint = hal_joint
+        self.axial_interface = LinuxCNCAxialInterface(hal_joint)
 
-        self.status = AxisStatus(axis_name)
-        self.logger = logging.getLogger(f"Motor-{axis_name}")
+        self.status = AxisStatus(axis)
+        self.logger = logging.getLogger(f"Motor-{axis}")
 
     def poll(self):
 
-        self.interface.update()
-        self.status.position = self.interface.get_position(self.joint)
-        self.status.velocity = self.interface.get_velocity()
-        self.status.enabled = self.interface.axis_enabled(self.joint)
+        ##if self.axial_interface.is_faulted():
+            ##self.status.state = AxisState.FAULT
+        
+        self.axial_interface.poll()
 
-        self.status.homed = self.interface.axis_homed(self.joint)
-        self.status.in_position = self.interface.axis_in_position()
         self.status.last_update = time.time()
 
-        # Homing detection
-        if self.status.state == AxisState.HOMING:
-            limits = self.interface.limits(self.joint)
+        if self.status.state == AxisState.FAULT:
+            self.logger.error(f"{self.axis}: Axis fault detected.")
+            return # do not continue state machine if fault is detected
 
-            if limits["min"] or limits["max"]:
-                self.status.homed = True
-                self.status.state = AxisState.COMPLETE
-                self.logger.info(f"{self.axis}: Home switch reached.")
+        elif self.status.state == AxisState.UNINITIALIZED:
+            if self.is_enabled():
+                self.status.state = AxisState.READY
+            return
+    
+        # Homing detection
+        elif self.status.state == AxisState.HOMING:
+            if self.axial_interface.has_axis_been_homed():
+                self.status.state = AxisState.READY
+                self.logger.info(f"{self.axis}: Has been homed.")
+                return
+            
+            else:
+                if not self.axial_interface.has_homing_ever_been_intialized():
+                    self.axial_interface.home_axis()
 
         # Motion completion
         elif self.status.state == AxisState.MOVING:
+            if not self.axial_interface.has_axis_been_homed():
+                self.logger.info(f"{self.axis}: Axis has not been homed so will not move.")
+                return
 
-            if self.status.in_position:
-                self.status.state = AxisState.COMPLETE
+            elif self.axial_interface.is_axis_in_position():
+                self.status.state = AxisState.READY
                 self.logger.info(f"{self.axis}: Motion complete.")
-
-        elif self.status.state == AxisState.COMPLETE:
-            self.status.state = AxisState.READY
+                return
 
     def home(self):
         self.status.state = AxisState.HOMING
-        self.interface.home_axis(self.joint)
         self.logger.info( f"{self.axis}: Homing")
 
     def is_homed(self):
-        return self.status.homed
+        return self.axial_interface.has_axis_been_homed()
     
-    def move_to(self, position, feed=1000):
-        self.status.commanded_position = position
-        self.status.state = AxisState.MOVING
-        self.interface.move_axis(self.axis, position, feed)
+    def move(self, position, feed=1):
+        if self.is_homed():
+            if self.axial_interface.is_position_in_range():
+                self.status.state = AxisState.MOVING
+                self.axial_interface.move_axis(self.axis, position, feed)
+      
+            else: 
+                self.logger.error(f"{self.axis}: Position out of homed range check forge configuration in toolpath generator")
+        else:
+            self.logger.error(f"{self.axis}: Axis has not been homed. Home the axis first with the home() method.")
 
-        self.logger.info(f"{self.axis}: Move -> {position}")
-
-    def move_relative(self, distance: float):
-        self.move_to(self.status.position + distance)
-
-    def stop(self):
+    def soft_stop(self):
+        self.axial_interface.soft_stop()
+        self.status.state = AxisState.READY
         self.logger.info(f"{self.axis}: Stop")
 
-    def emergency_stop(self):
+    def estop(self):
         self.status.state = AxisState.ESTOP
+        self.axial_interface.estop()
         self.logger.warning( f"{self.axis}: ESTOP")
 
-    #status queries 
-    def is_done(self):
-        return self.status.state == AxisState.COMPLETE
+    def is_estop_active(self):
+        return self.status.state == AxisState.ESTOP
 
-    def is_idle(self):
-        return self.status.state in ( AxisState.READY, AxisState.COMPLETE )
-
-    def is_faulted(self):
-        return self.status.fault
-
-    def is_enabled(self):
-        return self.status.enabled
-
-    @property
+    def is_moving(self):
+        return self.status.state == AxisState.MOVING
+    
     def position(self):
-        return self.status.position
-
-
-    @property
-    def target(self):
-        return self.status.commanded_position
+        return self.axial_interface.get_position()
+    
+    def is_retracted(self):
+        return self.axial_interface.get_position() == 0
+    
+    def is_idle(self):
+        return self.axial_interface.is_idle()
+    
+    def is_enabled(self):
+        return self.axial_interface.is_axis_enabled()

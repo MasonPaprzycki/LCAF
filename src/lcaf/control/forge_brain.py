@@ -20,7 +20,7 @@ from typing import List
 from typing import Optional
 from copy import deepcopy
 
-from lcaf.control.linuxcnc_interface import LinuxCNCInterface
+from lcaf.control.linuxcnc_interface import LinuxCNCAxialInterface
 from lcaf.control.motion_coordinator import MotionCoordinator, MotionCoordinatorState
 
 from lcaf.utils.toolpath import ToolpathOperation

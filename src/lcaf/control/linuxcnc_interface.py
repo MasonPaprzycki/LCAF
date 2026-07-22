@@ -2,103 +2,64 @@ from __future__ import annotations
 
 import linuxcnc
 import hal
+import time
 
-class LinuxCNCInterface:
+class LinuxCNCAxialInterface:
 
-    def __init__(self):
-
+    def __init__(self, hal_joint: int):
+        # 1 inch = 25.4 mm
         self.command = linuxcnc.command()
         self.status = linuxcnc.stat()
         self.error = linuxcnc.error_channel()
+        self.min_limit = {"inches": 0.0, "mm": 0.0}
+        self.max_limit = {"inches": 0.0, "mm": 0.0}
+        self.hal_joint = hal_joint
+        self.position_offset_to_native = 0.0 
 
-        # Default limit switch HAL pins
-        # Change these to match machine configuration.
+        self.axis_homed = False
+        self.homing_ever_been_intialized = False
 
-        self.limit_pins = {
 
-            0: {
-                "min": "joint.0.neg-lim-sw-in",
-                "max": "joint.0.pos-lim-sw-in"
-            },
+        #limit switch HAL pins
 
-            1: {
-                "min": "joint.1.neg-lim-sw-in",
-                "max": "joint.1.pos-lim-sw-in"
-            },
-
-            2: {
-                "min": "joint.2.neg-lim-sw-in",
-                "max": "joint.2.pos-lim-sw-in"
-            },
-
-            3: {
-                "min": "joint.3.neg-lim-sw-in",
-                "max": "joint.3.pos-lim-sw-in"
-            }
-
+        # defines the limit switch for the minimum axis position 
+        self.limit_switch_hal_pins = {
+            "min": f"joint.{hal_joint}.neg-lim-sw-in",
+            "max": f"joint.{hal_joint}.pos-lim-sw-in"
         }
 
+
+        # Homing command needs to check whether the min axis position
+        # limit switch is active. If it is active it should not move
+        # in the negative direction it would then move in the positive direction
+        # until the maximum limit switch is activated.
+        # It then sets the min position as zero
+        # and the max position as however far the distance between them is.
+        # It should pull the hal configuration from linux cnc to know
+        # Basically the gear ratio and how many turns or step signals converts into what distance
+        # But it should not assume the set distance or length of the axis provided by the user is correct
+        # it finds that distance with the limit switches.
+        #
+        # During homing this interface dynamically updates:
+        #
+        #     self.min_limit
+        #     self.max_limit["mm"]
+        #     self.max_limit["inches"]
+        #
+        # using the measured travel of the axis.
+
+        
     #Status update 
-    def update(self):
+    def poll(self):
         self.status.poll()
 
     # Machine Status
     def machine_on(self):
         return self.status.task_state == linuxcnc.STATE_ON
 
-    def machine_enabled(self):
-        return self.status.enabled
-
-    def estop(self):
-        return self.status.estop
-
-    def interpreter_idle(self):
-        return self.status.interp_state == linuxcnc.INTERP_IDLE
-
     def program_running(self):
         return self.status.interp_state == linuxcnc.INTERP_READING
-
-    def mode(self):
-        return self.status.task_mode
-
-    def task_state(self):
-        return self.status.task_state
-
-    def all_homed(self):
-        return all(self.status.homed)
-
-    #axis status
-
-    def get_position(self, joint):
-        return self.status.position[joint]
-
-    def get_velocity(self):
-        return self.status.current_vel
-
-    def axis_homed(self, joint):
-        return self.status.homed[joint]
-
-    def axis_enabled(self, joint):
-        return self.status.enabled
-
-    def axis_in_position(self):
-        return self.status.inpos
-
-    #homing
-    def home_axis(self, joint):
-        self.command.mode(linuxcnc.MODE_MANUAL)
-        self.command.wait_complete()
-        self.command.home(joint)
-        #no wait_complete here
-
-    def home_all(self):
-        self.command.mode(linuxcnc.MODE_MANUAL)
-        self.command.wait_complete()
-        self.command.home(-1)
-
-    def unhome_axis(self, joint):
-        self.command.unhome(joint)
-
+    
     #Machine Control 
     def abort(self):
         self.command.abort()
@@ -106,11 +67,106 @@ class LinuxCNCInterface:
     def estop_reset(self):
         self.command.state(linuxcnc.STATE_ESTOP_RESET)
 
+    def estop(self):
+        self.command.state(linuxcnc.STATE_ESTOP)
+        
     def machine_on_command(self):
         self.command.state(linuxcnc.STATE_ON)
 
     def machine_off(self):
         self.command.state(linuxcnc.STATE_OFF)
+
+    def soft_stop(self):
+        self.command.jog(linuxcnc.JOG_STOP, True, self.hal_joint)
+
+    #axis status getter functions
+    def get_linuxcnc_native_position(self):
+        self.poll()
+        return self.status.position[self.hal_joint]
+    
+    def get_position(self):
+        self.poll()
+        return self.get_linuxcnc_native_position() - self.position_offset_to_native
+
+    def get_velocity(self):
+        self.poll()
+        return self.status.joint[self.hal_joint]["velocity"]
+
+    def has_axis_been_homed(self):
+        self.poll()
+        return self.axis_homed
+    
+    def has_homing_ever_been_intialized(self):
+        self.poll()
+        return self.homing_ever_been_intialized
+
+    def is_axis_enabled(self):
+        self.poll()
+        return self.status.enabled
+
+    def is_axis_in_position(self):
+        self.poll()
+        return self.status.joint[self.hal_joint]["inpos"]
+    
+    def is_position_in_range(self):
+        self.poll()
+        return (self.min_limit["mm"] <= self.get_position() <= self.max_limit["mm"])
+    
+    def get_targeted_position(self):
+        self.poll()
+        return self.status.commanded_position[self.hal_joint]
+    
+    #homing
+    def home_axis(self, speed: float = 1.0, timeout: float = 30.0):
+        self.homing_ever_been_intialized = True
+        self.poll()
+
+        if self.min_limit_active():
+            self.position_offset_to_native = self.get_linuxcnc_native_position()
+
+            try:
+
+                self.jog_positive(speed)
+
+                start_time = time.monotonic()
+
+                while not self.max_limit_active():
+
+                    self.poll()
+
+                    if time.monotonic() - start_time > timeout:
+                        raise TimeoutError(
+                            "Timed out waiting for the maximum limit switch."
+                        )
+            finally:
+                self.soft_stop()
+
+            self.max_limit["mm"] = self.get_position()
+            self.max_limit["inches"] = self.max_limit["mm"] / 25.4
+            self.min_limit["mm"] = 0.0
+            self.min_limit["inches"] = 0.0
+
+        else:
+
+            try:
+                self.jog_negative(speed)
+
+                start_time = time.monotonic()
+
+                while not self.min_limit_active():
+                    self.poll()
+
+                    if time.monotonic() - start_time > timeout:
+                        raise TimeoutError(
+                            "Timed out waiting for the minimum limit switch."
+                        )
+            finally:
+                self.soft_stop()
+
+            return self.home_axis(speed=speed, timeout=timeout)
+
+        self.axis_homed = True
+        
 
     #MDI 
     def execute_mdi(self, mdi):
@@ -120,10 +176,7 @@ class LinuxCNCInterface:
         self.command.mdi(mdi)
         #no wait_complete here
 
-    def move_axis(self,
-                  axis: str,
-                  position: float,
-                  feed: float = 1000):
+    def move_axis(self, axis: str, position: float, feed: float = 1000):
 
         mdi = f"G1 {axis.upper()}{position:.4f} F{feed}"
 
@@ -152,45 +205,59 @@ class LinuxCNCInterface:
     def dwell(self, seconds):
         self.execute_mdi(f"G4 P{seconds}")
 
-   #Hal read 
-    def read_pin(self, pin_name):
-        return hal.get_value(pin_name)
-
-    def read_pins(self, pins):
-
-        values = {}
-
-        for pin in pins:
-            values[pin] = hal.get_value(pin)
-
-        return values
-
     #Hal write 
-    def write_pin(self, pin_name, value):
+    def min_limit_active(self):
+        return self.read_pin(
+            pin_suffix=None, pin_name=self.limit_switch_hal_pins["min"]
+        )
+
+    def max_limit_active(self):
+        return self.read_pin(
+            pin_suffix=None,
+            pin_name=self.limit_switch_hal_pins["max"]
+        )
+    
+    def write_pin(
+            self,  
+            pin_suffix: str | None,
+            pin_name : str|None,
+            value
+        ):
+        
+        if pin_name is None: 
+            if  (pin_suffix is not None):
+                pin_name = f"joint.{self.hal_joint}.{pin_suffix}"
+            else: 
+                raise KeyError("Hal pin has not been designated")
+        
         hal.set_p(pin_name, str(value))
 
-    # Limit switches 
-    def limit_min(self, joint):
-        return self.read_pin(
-            self.limit_pins[joint]["min"]
-        )
-
-    def limit_max(self, joint):
-        return self.read_pin(
-            self.limit_pins[joint]["max"]
-        )
-
-    def limits(self, joint):
-        return {
-            "min": self.limit_min(joint),
-            "max": self.limit_max(joint)
-        }
+    def jog_positive(self, speed):
+        self.command.mode(linuxcnc.MODE_MANUAL)
+        self.command.wait_complete()
+        self.command.jog(linuxcnc.JOG_CONTINUOUS, True, self.hal_joint, speed)
+    
+    def jog_negative(self, speed):
+        self.command.mode(linuxcnc.MODE_MANUAL)
+        self.command.wait_complete()
+        self.command.jog(linuxcnc.JOG_CONTINUOUS, True, self.hal_joint, -speed)
+    
     
     #hal helpers 
-    def read_axis_pin(self, joint, pin_suffix):
-        pin = f"joint.{joint}.{pin_suffix}"
+    def read_pin(
+            self, 
+            pin_suffix: str | None,
+            pin_name : str|None
+        ):
 
-        return self.read_pin(pin)
+        if pin_name is None: 
+            if (pin_suffix is not None):
+                pin_name = f"joint.{self.hal_joint}.{pin_suffix}"
+            else: 
+                raise KeyError("Hal pin has not been designated")
+            
+        return hal.get_value(pin_name)
+    
 
     def get_errors(self):
         errors = []
@@ -205,18 +272,12 @@ class LinuxCNCInterface:
 
         return errors
     
-    def homing_error(self):
+    def is_idle(self, velocity_tolerance: float = 1e-6):
+        self.poll()
 
-        errors = self.get_errors()
+        joint = self.status.joint[self.hal_joint]
 
-        for error in errors:
-
-            if error is None:
-                continue
-
-            text = str(error).lower()
-
-            if "home" in text:
-                return error
-
-        return None
+        return (
+            joint["inpos"] and
+            abs(joint["velocity"]) <= velocity_tolerance
+        )

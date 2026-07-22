@@ -749,7 +749,7 @@ Move Z
 while delegating all actual motion execution to LinuxCNC.
 
 ---
-# Motor State Machine
+# Axis State Machine
 
 Every machine axis owns an independent Axis object.
 
@@ -765,14 +765,13 @@ Each Axis maintains its own operational state.
                            ▼
                         READY
                      ┌─────┴─────┐
-                     │   MOVING  │
+                     │           │
                      ▼           ▼
                    HOMING      MOVING
               (constant vel)  (Toolpath sub operation)
                      │           │
                      └─────┬─────┘
                            │
-                        COMPLETE
                            │
                            ▼
                         READY

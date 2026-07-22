@@ -30,7 +30,7 @@ class Telemetry:
 @dataclass(frozen=True)
 class TelemetrySnapshot:
     timestamp: float
-    machine_enabled: bool
+    motion_enabled: bool
     machine_homed: bool
     estop: bool
     runtime: float

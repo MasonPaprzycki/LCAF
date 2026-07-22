@@ -49,19 +49,15 @@ class Controller:
 
     def build_snapshot(self):
 
-        interface = self.motion.interface
-
-        interface.update()
-
         return TelemetrySnapshot(
 
             timestamp=time.time(),
 
-            machine_enabled = interface.machine_enabled(),
+            motion_enabled = self.motion.is_motion_enabled(),
 
-            machine_homed = interface.all_homed(),
+            machine_homed = self.motion.all_homed(),
 
-            estop = interface.estop(),
+            estop = self.motion.is_estop_active(),
 
             runtime = time.time() - self.brain.state.start_time,
 
