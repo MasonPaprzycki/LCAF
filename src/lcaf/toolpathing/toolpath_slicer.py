@@ -116,31 +116,43 @@ class MachineLimits:
 
     @classmethod
     def from_lcaf_config(cls, filename: str | Path) -> "MachineLimits":
-        """Read the current ``configs/forge_parameters.json`` shape.
+        """Read machine X/Y/Z travel limits from ``configs/axis.jsonl``.
 
-        The rotary (A) axis is continuous on this machine and is not limited
-        here; only the linear X/Y/Z travel is validated against this file.
+        These are the same soft_min_mm/soft_max_mm each JointConfiguration
+        carries for LinuxCNC's own INI generation (see
+        lcaf.utils.joint_configuration) -- there is a single on-disk source
+        for machine travel limits, not a separate copy for the slicer.
+
+        The rotary (A) axis is continuous on this machine (see
+        JointConfiguration.has_limit_switches) and is not limited here; only
+        the linear X/Y/Z travel is validated against this file.
         """
+        from lcaf.utils.joint_configuration import load_joint_configurations
+
         path = Path(filename)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            joints = load_joint_configurations(path)
+        except (OSError, ValueError) as error:
             raise ToolpathPlanningError(
                 f"Could not read machine limits from {path}: {error}"
             ) from error
 
+        by_axis = {joint.axis: joint for joint in joints}
+
         try:
+            x, y, z = by_axis["X"], by_axis["Y"], by_axis["Z"]
+
             return cls(
-                x_min_mm=float(data["fully_retracted_x_position_mm"]),
-                x_max_mm=float(data["fully_extended_x_position_mm"]),
-                y_min_mm=float(data["fully_retracted_y_position_mm"]),
-                y_max_mm=float(data["fully_extended_y_position_mm"]),
-                z_retracted_mm=float(data["fully_retracted_z_position_mm"]),
-                z_extended_mm=float(data["fully_extended_z_position_mm"]),
+                x_min_mm=float(x.soft_min_mm),
+                x_max_mm=float(x.soft_max_mm),
+                y_min_mm=float(y.soft_min_mm),
+                y_max_mm=float(y.soft_max_mm),
+                z_retracted_mm=float(z.soft_min_mm),
+                z_extended_mm=float(z.soft_max_mm),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ToolpathPlanningError(
-                f"Machine-limit file {path} is missing a numeric LCAF limit: {error}"
+                f"Joint configuration {path} is missing an X/Y/Z travel limit: {error}"
             ) from error
 
 

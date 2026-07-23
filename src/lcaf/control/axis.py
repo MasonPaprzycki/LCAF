@@ -5,9 +5,9 @@ import logging
 
 from enum import Enum, auto
 from dataclasses import dataclass, field
-from typing import Optional
 
-from lcaf.control.linuxcnc_interface import LinuxCNCAxialInterface
+from lcaf.utils.joint_configuration import JointConfiguration
+from lcaf.control.linuxcnc_interface import LinuxCNCAxialInterface, LinuxCNCMachineInterface
 
 class AxisState(Enum):
     UNINITIALIZED = auto()
@@ -28,19 +28,19 @@ class AxisStatus:
 
 class Axis:
 
-    def __init__(self, axis: str, hal_joint: int):
-        self.axis = axis
-        self.joint = hal_joint
-        self.axial_interface = LinuxCNCAxialInterface(hal_joint)
+    def __init__(self, joint_config: JointConfiguration, machine: LinuxCNCMachineInterface):
+        self.axis = joint_config.axis.lower()
+        self.joint = joint_config.joint
+        self.axial_interface = LinuxCNCAxialInterface(joint_config, machine)
 
-        self.status = AxisStatus(axis)
-        self.logger = logging.getLogger(f"Motor-{axis}")
+        self.status = AxisStatus(self.axis)
+        self.logger = logging.getLogger(f"Motor-{self.axis}")
 
     def poll(self):
 
         ##if self.axial_interface.is_faulted():
             ##self.status.state = AxisState.FAULT
-        
+
         self.axial_interface.poll()
 
         self.status.last_update = time.time()
@@ -53,14 +53,14 @@ class Axis:
             if self.is_enabled():
                 self.status.state = AxisState.READY
             return
-    
+
         # Homing detection
         elif self.status.state == AxisState.HOMING:
             if self.axial_interface.has_axis_been_homed():
                 self.status.state = AxisState.READY
                 self.logger.info(f"{self.axis}: Has been homed.")
                 return
-            
+
             else:
                 if not self.axial_interface.has_homing_ever_been_intialized():
                     self.axial_interface.home_axis()
@@ -82,14 +82,14 @@ class Axis:
 
     def is_homed(self):
         return self.axial_interface.has_axis_been_homed()
-    
-    def move(self, position, feed=1):
+
+    def move(self, position, feed=1000):
         if self.is_homed():
             if self.axial_interface.is_position_in_range():
                 self.status.state = AxisState.MOVING
-                self.axial_interface.move_axis(self.axis, position, feed)
-      
-            else: 
+                self.axial_interface.move(position, feed)
+
+            else:
                 self.logger.error(f"{self.axis}: Position out of homed range check forge configuration in toolpath generator")
         else:
             self.logger.error(f"{self.axis}: Axis has not been homed. Home the axis first with the home() method.")
@@ -100,8 +100,13 @@ class Axis:
         self.logger.info(f"{self.axis}: Stop")
 
     def estop(self):
+        """
+        Mark this axis as ESTOP'd. E-Stop itself is a machine-wide LinuxCNC
+        state (linuxcnc.STATE_ESTOP), not a per-joint one -- the actual
+        hardware command is issued once via LinuxCNCMachineInterface by
+        MotionCoordinator.emergency_stop(). This just updates bookkeeping.
+        """
         self.status.state = AxisState.ESTOP
-        self.axial_interface.estop()
         self.logger.warning( f"{self.axis}: ESTOP")
 
     def is_estop_active(self):
@@ -109,15 +114,15 @@ class Axis:
 
     def is_moving(self):
         return self.status.state == AxisState.MOVING
-    
+
     def position(self):
         return self.axial_interface.get_position()
-    
+
     def is_retracted(self):
         return self.axial_interface.get_position() == 0
-    
+
     def is_idle(self):
         return self.axial_interface.is_idle()
-    
+
     def is_enabled(self):
         return self.axial_interface.is_axis_enabled()

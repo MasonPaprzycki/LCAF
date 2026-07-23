@@ -238,7 +238,7 @@ those discrete rotations are ever struck. The planner also rejects excess
 machine X/Y/Z travel.
 
 The rotary (A) axis is continuous on this machine and is not limited by the
-planner or `configs/forge_parameters.json`; any commanded rotation is valid.
+planner or `configs/axis.jsonl`; any commanded rotation is valid.
 
 This model is a geometric envelope planner, not a forming simulation. It does
 not predict volume flow, flash, springback, temperature effects, die compliance,

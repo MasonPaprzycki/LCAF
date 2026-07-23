@@ -70,8 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--machine-config",
         type=Path,
-        default=Path("configs/forge_parameters.json"),
-        help="LCAF machine-limit JSON file",
+        default=Path("configs/axis.jsonl"),
+        help="LCAF joint-configuration JSONL file (machine X/Y/Z travel limits)",
     )
     parser.add_argument(
         "--die-width",

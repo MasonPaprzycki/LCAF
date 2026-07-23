@@ -912,7 +912,7 @@ class ToolpathApp(tk.Tk):
     @staticmethod
     def _default_limits() -> MachineLimits:
         root = Path(__file__).resolve().parents[3]
-        config = root / "configs" / "forge_parameters.json"
+        config = root / "configs" / "axis.jsonl"
         try:
             return MachineLimits.from_lcaf_config(config)
         except ToolpathPlanningError:

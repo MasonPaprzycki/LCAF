@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Generated LinuxCNC .hal/.ini output (regenerated from configs/machine.json + configs/axis.jsonl)
+configs/generated/

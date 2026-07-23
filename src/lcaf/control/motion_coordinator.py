@@ -1,10 +1,23 @@
+from __future__ import annotations
+
 from enum import Enum, auto
 import logging
+from pathlib import Path
 from typing import Optional
 
 from lcaf.utils.toolpath import ToolpathOperation
-from lcaf.control.linuxcnc_interface import LinuxCNCAxialInterface
+from lcaf.utils.joint_configuration import (
+    MachineConfiguration,
+    load_machine_configuration,
+    write_config_files,
+)
+from lcaf.control.linuxcnc_interface import LinuxCNCMachineInterface
 from lcaf.control.axis import Axis
+
+# Repo root's configs/ directory: src/lcaf/control/motion_coordinator.py -> configs/
+_DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
+_DEFAULT_MACHINE_CONFIG = _DEFAULT_CONFIG_DIR / "machine.json"
+_DEFAULT_GENERATED_DIR = _DEFAULT_CONFIG_DIR / "generated"
 
 class MotionCoordinatorState(Enum):
 
@@ -46,15 +59,29 @@ class MotionCoordinator:
     and checks completion.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        machine_config: MachineConfiguration | None = None,
+        machine_config_path: str | Path = _DEFAULT_MACHINE_CONFIG,
+        generated_config_dir: str | Path = _DEFAULT_GENERATED_DIR,
+    ):
         self.logger = logging.getLogger("ForgeBrain.Motion")
-    
+
+        if machine_config is None:
+            machine_config = load_machine_configuration(machine_config_path)
+
+        # Regenerate the .hal/.ini pair LinuxCNC operates on so the joint
+        # config below is always what's actually running on the machine.
+        write_config_files(machine_config, generated_config_dir)
+
+        self.interface = LinuxCNCMachineInterface()
+
         self.axes = {
-            "x": Axis("x", 0),
-            "y": Axis("y", 1),
-            "z": Axis("z", 2),
-            "a": Axis("a", 3)
+            joint.axis.lower(): Axis(joint, self.interface)
+            for joint in machine_config.joints
         }
+
+        self.interface.register_axes(self.axes.values())
 
         self.state = MotionCoordinatorState.IDLE
 
@@ -72,6 +99,8 @@ class MotionCoordinator:
         Motor state changes/errors should be logged
         inside Motor.poll().
         """
+
+        self.interface.poll()
 
         for name, axis in self.axes.items():
 
@@ -107,7 +136,7 @@ class MotionCoordinator:
         self.logger.debug("All axes idle")
 
         return True
-    
+
     def is_axis_in_position(self, axis: str, position: float):
         if axis not in self.axes:
             self.logger.error(f"Invalid axis command: axis={axis}")
@@ -209,16 +238,16 @@ class MotionCoordinator:
 
     def is_complete(self):
         return self.state == MotionCoordinatorState.COMPLETE
-    
+
     def has_fault(self):
         return self.state == MotionCoordinatorState.FAULT
-    
+
     def reset(self):
         self.active_operation = None
         self.command_sent = False
         self.state = MotionCoordinatorState.IDLE
 
-    def update(self):
+    def update(self, telemetry=None):
 
         if self.active_operation is None:
             return
@@ -252,7 +281,7 @@ class MotionCoordinator:
                 self.state = MotionCoordinatorState.RETRACT_X
 
             return
-        
+
          # Retract X
         if self.state == MotionCoordinatorState.RETRACT_X:
             self.move_axis("x", 0.0)
@@ -294,8 +323,8 @@ class MotionCoordinator:
                 self.state = MotionCoordinatorState.MOVE_Y
 
             return
-        
-        
+
+
         # Move Y
         if self.state == MotionCoordinatorState.MOVE_Y:
             self.move_axis( "y", operation.y )
@@ -317,7 +346,7 @@ class MotionCoordinator:
 
             return
 
-        # Verify Z 
+        # Verify Z
         if self.state == MotionCoordinatorState.VERIFY_Z_POSITION:
             if self.is_axis_in_position("z", operation.die_gap) and self.all_idle():
                 self.state = MotionCoordinatorState.COMPLETE
@@ -330,16 +359,19 @@ class MotionCoordinator:
                 return True
 
         return False
-    
-    def estop(self):
-        for name, axis in self.axes.items():
+
+    def emergency_stop(self):
+        """
+        Machine-wide E-Stop. Issued once through the shared LinuxCNC
+        connection, then reflected into each Axis's bookkeeping state.
+        """
+
+        self.interface.estop_command()
+
+        for axis in self.axes.values():
             axis.estop()
 
-        logging.log(logging.INFO, "EMERGENCY STOP ACTIVATED")
+        self.logger.info("EMERGENCY STOP ACTIVATED")
 
     def is_estop_active(self):
-        for name, axis in self.axes.items():
-            if not axis.is_estop_active():
-                return False
-
-        return True
+        return self.interface.estop()
