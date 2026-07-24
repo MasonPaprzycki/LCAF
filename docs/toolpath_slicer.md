@@ -104,11 +104,14 @@ or `--auto-cycles` to keep adding cycles automatically until the simulated
 geometry matches the target within `--auto-cycles-tolerance` (default 0.5
 mm), up to `--auto-cycles-max` (default 20) before giving up with a warning.
 
-Add `--material` (`plasticine`, `aluminum`, or `steel`; default `steel`) and
-`--temperature` to make the billet material/temperature drive the
-*preview's* deformation mechanics and a separate force estimate printed
-after planning -- see [Material and temperature](#material-and-temperature)
-below. Neither flag changes the planned strike coordinates.
+Add `--material` and `--temperature` to make the billet material/temperature
+drive the *preview's* deformation mechanics and a separate force/contact-
+pressure estimate printed after planning -- see
+[Material and temperature](#material-and-temperature) below. Neither flag
+changes the planned strike coordinates. `--material` accepts one generic
+band per family (`plasticine`, `aluminum`, `steel`; default `steel`) plus
+several named grades within each family -- run `python -m lcaf.toolpathing
+--help` for the full, current list (`lcaf.toolpathing.material.MATERIALS`).
 
 ## Radial segments, strikes per segment, and cycles
 
@@ -196,17 +199,21 @@ Material either footprint displaces is not deleted: it relaxes smoothly,
 immediately adjacent to it -- both axially into neighbouring segments and
 tangentially around neighbouring angles -- toward the target's own known
 boundary in that exact direction, the same way forge-temperature steel
-spreads out from under a die rather than shrinking in volume. That
-relaxation fades out within a couple of footprint dimensions of each die's
-edge, is bounded so it never overshoots past the target's own boundary in
-that exact direction (never past that segment's own eventual value), and is
-tied entirely to that die's own contact interface: material outside a
-strike's zone of influence is left completely untouched by it. Each ray's
-move toward target is a smooth, gradual blend -- never an instant jump --
-so two neighbouring rays never differ by more than a smooth taper between
-them; see [Material and temperature](#material-and-temperature) below for
-exactly how much of that blend happens per strike, and how it is no longer
-isotropic.
+spreads out from under a die rather than shrinking in volume. Tangentially,
+and axially back toward the clamp, that relaxation fades out within a
+couple of footprint dimensions of the die's edge, as before; axially
+*forward* (+X, toward the free end), it reaches much further -- see
+[Forward propagation](#forward-propagation) below -- since the clamp cannot
+move but the free end can, so displaced material has somewhere to actually
+go in that direction. In every direction it is bounded so it never
+overshoots past the target's own boundary in that exact direction (never
+past that segment's own eventual value), and is tied entirely to that die's
+own contact interface: material outside a strike's zone of influence is
+left completely untouched by it. Each ray's move toward target is a smooth,
+gradual blend -- never an instant jump -- so two neighbouring rays never
+differ by more than a smooth taper between them; see
+[Material and temperature](#material-and-temperature) below for exactly how
+much of that blend happens per strike, and how it is no longer isotropic.
 
 At the default `upper_die_radius_mm` (which always fully covers the target
 at the segment it strikes), **the final shape, once enough rotations/cycles
@@ -225,15 +232,31 @@ than silently giving up if it still has not by `--auto-cycles-max`.
 
 ## Material and temperature
 
-`--material` (`plasticine`, `aluminum`, or `steel`) and `--temperature`
-(degrees C) are resolved by `lcaf.toolpathing.material` into a temperature
-band with a 0..1 `formability` -- an approximate, order-of-magnitude
-engineering estimate, not a sourced alloy datasheet or a constitutive model.
-Bands are deliberately simple (cold/warm/hot per material, roughly matched
-to where each material is actually forged in practice) rather than a
-continuous curve, for practicality. `formability` drives two purely
-geometric knobs in the *preview's* deformation mechanics (never the planned
-strike coordinates):
+`--material` and `--temperature` (degrees C) are resolved by
+`lcaf.toolpathing.material` into a temperature band with a 0..1
+`formability` -- an approximate, order-of-magnitude engineering estimate,
+not a sourced alloy datasheet or a constitutive model. Bands are
+deliberately simple (cold/warm/hot per material, roughly matched to where
+each material is actually forged/worked in practice) rather than a
+continuous curve, for practicality.
+
+`lcaf.toolpathing.material.MATERIALS` lists every valid `--material` key.
+Each family -- `plasticine`, `aluminum`, `steel` -- keeps its original bare
+name as a generic, prototypical mid-range band, and additionally offers
+several named grades with their own flow stress/friction/formability
+numbers (e.g. `steel_1018` mild steel, `steel_4140` chromoly alloy,
+`steel_304_stainless`, `aluminum_1100` pure/dead-soft, `aluminum_6061`,
+`aluminum_7075` aerospace alloy, `plasticine_soft`, `plasticine_hard`). These
+grades are still hand-picked, order-of-magnitude engineering estimates, not
+mill-test-report or datasheet values -- their purpose is to make relative
+comparisons between grades believable (a stainless needs more force/pressure
+than a mild steel at the same geometry; a soft aluminum spreads more per
+strike than a hard one), not to stand in for real material characterization.
+`lcaf.toolpathing.material.MATERIAL_LABELS` maps each key to a human-readable
+label for the UI's material picker.
+
+`formability` drives two purely geometric knobs in the *preview's*
+deformation mechanics (never the planned strike coordinates):
 
 - **`reach_scale`** (0.4..1.0) -- how far displaced material bulges from a
   die's rigid edge. Cold/stiff material bulges tightly against the die;
@@ -265,17 +288,111 @@ short, wide one toward axial spread -- rather than the same symmetric
 distance-based falloff regardless of die shape. A square/symmetric
 footprint reduces exactly to the previous, isotropic margins.
 
-A completely separate slab-method (friction-hill) force estimate --
-`F = flow_stress * contact_area * (1 + friction * width / (3 * height))`,
-the standard closed-form flat-die forging force estimate -- is computed
-from the same material/temperature and the strike's own die geometry
-(`lcaf.toolpathing.material.estimate_operation_force_kn` /
-`plan_force_report`). It is a hand-calculation-grade estimate for process
-planning, entirely separate from the deformation preview: it never feeds
-back into planned coordinates or the animated shape, and dies are treated
-as rigid and able to supply whatever force it reports. The CLI prints the
-plan's peak estimated force; the UI has a dedicated **Force estimate** tab
-(see [the UI guide](toolpath_slicer_ui_guide.md)).
+A completely separate slab-method (friction-hill) estimate -- the standard
+closed-form flat-die forging calculation -- is computed from the same
+material/temperature and the strike's own die geometry. It is reported two
+ways:
+
+- **Contact pressure** (`lcaf.toolpathing.material.
+  estimate_strike_contact_pressure_mpa` / `estimate_operation_stress_mpa`),
+  in MPa: `p = flow_stress * (1 + friction * width / (3 * height))`. This is
+  the actual *stress* the die must apply against the material's own contact
+  area to induce plastic flow at that geometry -- the number a die/press/
+  frame strength check should be sized against, since it does not depend on
+  how large the contact patch happens to be.
+- **Force** (`lcaf.toolpathing.material.estimate_strike_force_kn` /
+  `estimate_operation_force_kn`), in kN: `F = p * contact_area`, the
+  contact pressure above times the strike's own contact area. This is what a
+  press-tonnage/actuator-capacity check should be sized against.
+
+The two numbers can diverge sharply for the same material: a small die
+concentrates a modest total force into very high contact pressure, while a
+large die needs much more total force to reach the same pressure. Reading
+force alone can therefore understate how much stress the material and
+tooling actually see at a strike with a small contact patch. Both are purely
+hand-calculation-grade estimates for process planning, entirely separate
+from the deformation preview: neither feeds back into planned coordinates or
+the animated shape, and dies are treated as rigid and able to supply
+whatever force/pressure is reported. `plan_force_report` returns both
+figures per operation. The CLI prints the plan's peak estimated force *and*
+peak contact pressure; the UI's **Force estimate** tab plots both across the
+whole plan (see [the UI guide](toolpath_slicer_ui_guide.md)).
+
+## Forward propagation
+
+Every strike's bulge margin is asymmetric along X: it reaches only "a
+couple of footprint dimensions" backward, toward the clamp (unchanged from
+the isotropic behaviour above), but reaches much further forward, toward
+the free end, fading smoothly with distance rather than cutting off
+sharply. The clamp cannot move, so there is nowhere for material to go
+backward; the free end can, so a strike anywhere in the bar visibly,
+gradually nudges every station between it and the free end -- not just its
+immediate neighbours -- the same way real open-die forging progressively
+pushes material toward the unclamped end rather than displaced volume only
+ever showing up as a lump at the very tip.
+
+Concretely, in `visualization._apply_strike_3d`, the forward margin is the
+backward margin scaled by `_FORWARD_REACH_MULTIPLIER` (6x), capped at the
+actual remaining distance from the strike to the free end so the taper's
+own far edge lines up with (rather than needlessly overshooting past) it.
+This is a purely geometric refinement, independent of material -- it
+composes with confinement-weighted anisotropy and material/temperature
+gating exactly as before, and does not change the rigid footprint's own
+reach (still confined to the one segment/length a strike actually targets)
+or the die-contact interface it produces.
+
+This does **not** change the final trim allowance's own total (see below)
+-- that is a fixed quantity determined entirely by the stock length and the
+target's own volume, independent of how gradually the intermediate frames
+get there. What it changes is how that same conservation reads visually:
+instead of every station sitting at either exactly its own final target or
+exactly the pristine stock radius until its own dedicated strike suddenly
+arrives, the whole downstream length of the bar shows a smooth, decaying
+gradient of partial bulge that grows as more of the bar is struck --
+material genuinely appears to flow toward, and taper into, the free end's
+trim allowance, rather than the same volume balance being explained only by
+an abrupt stub glued past the target's own length.
+
+## Volume conservation and the trim allowance
+
+Forging never creates or deletes material -- unlike machining, nothing is
+cut away. The local bulge described above -- even with the forward
+propagation just described reaching much further than it used to -- is
+still bounded so it never overshoots the target's own boundary anywhere;
+by itself it does not account for every bit of cross-sectional area a
+strike removes. Whatever it does not locally reabsorb has to go somewhere:
+real open-die forging pushes it out the free end (the clamped end cannot
+move), extending the billet's total length beyond the target's own --
+exactly the "upset" a bar undergoes when its cross-section is reduced
+without also being cut shorter, which a shop then saws off once forging is
+complete.
+
+`lcaf.toolpathing.visualization.axial_trim_allowance_mm(plan,
+operation_index, operation_progress, radial_segments=48)` computes that
+length directly from a volume balance -- current total volume (the current,
+deformed cross-section trapezoidally integrated over every station) versus
+the original stock cylinder's volume -- rather than solving for it, so it
+is exactly conserving by construction and continuous in
+`operation_progress` (both the reference volume and the current volume use
+the same polygon discretisation and the same station-centre trapezoidal
+convention, so the comparison is apples-to-apples and reads exactly zero
+before the first strike, not some phantom discretisation error). It returns
+0.0 whenever the current state already holds at least as much volume as
+the original stock.
+
+This trim allowance is purely a *reporting/preview* quantity: it is never
+written into the exported JSONL and never changes a planned strike's own
+coordinates. The UI renders it as a distinct amber stub extending past the
+target's own free end in both the 2D axial-plan panel and the 3D view, with
+a dashed line marking exactly where the target's own length ends and the
+allowance begins, and reports the final expected allowance (once all
+strikes/cycles are done) in the stock-length info line after **Generate
+preview**. Using `recommended_stock_length_mm` (see below) as your actual
+starting stock length minimizes this allowance to (ideally) zero; using the
+mesh's own, typically longer, axial extent as your starting stock length
+(the simpler, more common real-world choice) will show a persistent,
+non-zero allowance to saw off -- both are handled by the same volume
+balance, honestly.
 
 ## Which end is clamped
 
@@ -315,11 +432,61 @@ direction from wherever it was sitting at power-on (there is no cable-wrap
 constraint -- see `docs/hardware_setup.md`), so any signed `rotation` value
 is valid and not limited by the planner or `configs/axis.jsonl`.
 
-This model is a geometric envelope planner, not a forming simulation. Material
-and temperature now give the deformation *preview* a more physically-motivated
-shape and convergence rate, and drive a separate force estimate, but neither
-is a constitutive/FEM model: this remains computational geometry, and does
-not predict true volume flow, flash, springback, die compliance, or tooling
-collisions. Its generated Z values depend on the fixture-specific
-`die_contact_z_mm` calibration. Review and prove every program off-material
-before loading it into the machine controller.
+## Limits of the computational-geometry model
+
+This planner is a geometric envelope planner, not a forming simulation, and
+that distinction should be read literally, not as a hedge. Concretely:
+
+- **The strike coordinates (x/y/die_gap/rotation) are the only outputs this
+  module can vouch for.** They come from an exact, closed-form geometric
+  construction (numerical integration of the target's true cross-section,
+  the convex-hull/support-function math in this module) with no free
+  parameters and no physical modelling involved.
+- **Everything else -- the animated bulge, the forward-propagation taper,
+  the trim-allowance stub, the die relaxation margins -- is a hand-tuned
+  geometric *visualization heuristic*, not a physics solve.** There is no
+  plasticity model, no FEM/constitutive solve, no strain field, and no
+  actual material being pushed around underneath it. `reach_scale`,
+  `closure_fraction`, `_footprint_bias`, and `_FORWARD_REACH_MULTIPLIER` (see
+  [Material and temperature](#material-and-temperature) and [Forward
+  propagation](#forward-propagation)) are constants chosen so the animation
+  *looks* like real forge-temperature material spreading, converges to the
+  correct final shape, and never jumps discontinuously -- they were not
+  derived from, and are not validated against, any real deformation data.
+  Two different die/segment configurations that look equally plausible in
+  the preview can differ arbitrarily in how a real billet would actually
+  deform between them.
+- **The volume-conservation trim allowance
+  (`axial_trim_allowance_mm`) is a real, exact volume balance of the
+  *displayed* geometry** -- current deformed cross-section vs. original
+  stock cylinder -- so it is internally consistent with what the preview
+  shows. It is not a prediction of real forging upset length, which depends
+  on friction, die shape, temperature gradients, and flow behavior this
+  model does not represent.
+- **Concave and hollow cross-sections are silently reduced to their convex
+  outer support envelope** (see the planner's own warning text in `plan()`).
+  Any concave feature -- a slot, a groove, an internal cavity -- is not
+  planned at all; the strikes generated are for the convex hull around it.
+- **What this model never predicts, at all:** true metal flow/grain flow,
+  flash formation, springback, die deflection/compliance, friction
+  distribution across a contact face (the friction-hill correction is a
+  single averaged number, not a spatial distribution), strain hardening
+  evolution across strikes, adiabatic heating or any temperature evolution
+  during forging (`target_temperature_c` is a fixed, user-supplied constant,
+  not simulated), grain structure, or tooling/fixture collisions.
+- The separate force/contact-pressure estimate (see [Material and
+  temperature](#material-and-temperature)) is a standard hand-calculation
+  (slab-method/friction-hill), not a simulation either -- it assumes
+  perfectly rigid, indestructible dies and a single averaged contact
+  pressure, and is meant for order-of-magnitude process-planning sanity
+  checks (is this within the press's tonnage rating), not for a stress
+  analysis of the tooling or fixture.
+- Its generated Z values depend entirely on the fixture-specific
+  `die_contact_z_mm` calibration measured at setup, not on anything CAD or
+  computational geometry can supply.
+
+None of the above is a defect to be silently trusted around: review and
+prove every generated program off-material, and use the deformation
+preview, trim allowance, and force/pressure estimate as planning aids only
+-- not as a substitute for a real forming simulation or physical trial
+where the process, material, or tooling is unfamiliar.

@@ -127,6 +127,11 @@ from .toolpath_slicer import (
 # can actually resolve as smooth.
 _MIN_MARGIN_FRACTION = 0.12
 
+# How much further a bulge margin reaches toward the free (unclamped) end
+# of the billet than it does toward the clamp, along X -- see the module
+# docstring's discussion of forward-biased propagation.
+_FORWARD_REACH_MULTIPLIER = 6.0
+
 
 def die_cap(
     tangential_offset_mm: float,
@@ -346,7 +351,7 @@ def material_state(
         radii_grid = _apply_strike_3d(
             radii_grid, angles, station_x, center_x, axial_half_length, disc_axial_half_length,
             rotation, support, stock_radius, width, corner_radius, target_radii_grid, upper_die_radius,
-            response.reach_scale, response.closure_fraction,
+            response.reach_scale, response.closure_fraction, progress,
         )
 
     return tuple(
@@ -368,6 +373,91 @@ def material_cross_section(
     if not 0 <= station_index < len(plan.sections):
         raise IndexError("station_index is outside the toolpath sections")
     return material_state(plan, operation_index, operation_progress, radial_segments)[station_index]
+
+
+def _ring_area(ring: Sequence[Point2]) -> float:
+    """Shoelace area of a closed ring of (y, z) points."""
+    count = len(ring)
+    if count < 3:
+        return 0.0
+    total = 0.0
+    for index in range(count):
+        y1, z1 = ring[index]
+        y2, z2 = ring[(index + 1) % count]
+        total += y1 * z2 - y2 * z1
+    return abs(total) / 2.0
+
+
+def axial_trim_allowance_mm(
+    plan: ToolpathPlan,
+    operation_index: int,
+    operation_progress: float,
+    radial_segments: int = 48,
+) -> float:
+    """How much extra length the free (+X) end currently holds to keep the
+    billet's total volume exactly conserved.
+
+    Forging never deletes or creates material. ``material_state``'s own
+    local bulge (see ``_apply_strike_3d``) only redistributes material a
+    couple of footprint dimensions from wherever a die actually struck, and
+    is bounded so it never overshoots the target's own boundary there -- by
+    itself, it does not account for all of the cross-sectional area a
+    strike removes. Whatever it does not locally reabsorb must reappear
+    somewhere: real open-die forging pushes it out the free end (the
+    clamped end cannot move), extending the billet's total length beyond
+    the target's own -- material a saw trims off once forging is complete.
+    This function returns that length directly from a volume balance --
+    current total volume (trapezoidally integrated over every station's
+    actual current ring) versus the original stock cylinder's volume --
+    rather than solving for it, so it is exactly conserving by construction
+    and continuous in ``operation_progress`` (the same continuous
+    ``material_state`` this integrates already is).
+
+    Returns 0.0 once the current state already holds at least as much
+    volume as the original stock (which can happen briefly ahead of the
+    local bulge's own gradual catch-up, or once ``stock_radius_mm`` and the
+    mesh's own length already happen to match the target's own volume with
+    nothing left over -- see ``recommended_stock_length_mm``).
+    """
+    sections = plan.sections
+    if not sections or not plan.operations:
+        return 0.0
+    station_x = tuple(section.x_model_mm for section in sections)
+    if len(station_x) < 2:
+        return 0.0
+    span_mm = station_x[-1] - station_x[0]
+    if span_mm <= 0.0:
+        return 0.0
+
+    # The reference "original stock volume" must use the exact same
+    # discretisation (this same polygon-sampled ring, trapezoidally
+    # integrated between these same station centres) that current_volume_mm3
+    # below uses -- otherwise a mismatch as small as a regular n-gon's area
+    # versus the true circle's, or trapezoidal-between-centres versus the
+    # sections' true edge-to-edge span, would show up as a phantom volume
+    # "deficit" (and therefore a phantom trim allowance) even for the
+    # pristine, untouched stock. Since the pristine cross-section is
+    # constant along X, trapezoidally integrating it is exactly
+    # area * span regardless of intermediate station spacing.
+    stock_radius_mm = float(plan.operations[0]["metadata"]["stock_radius_mm"])
+    angles = tuple(2.0 * math.pi * index / radial_segments for index in range(radial_segments))
+    pristine_ring = tuple((stock_radius_mm * math.cos(angle), stock_radius_mm * math.sin(angle)) for angle in angles)
+    original_stock_volume_mm3 = _ring_area(pristine_ring) * span_mm
+
+    state = material_state(plan, operation_index, operation_progress, radial_segments)
+    current_volume_mm3 = sum(
+        0.5 * (_ring_area(state[index]) + _ring_area(state[index + 1]))
+        * (station_x[index + 1] - station_x[index])
+        for index in range(len(state) - 1)
+    )
+
+    deficit_mm3 = original_stock_volume_mm3 - current_volume_mm3
+    if deficit_mm3 <= 0.0:
+        return 0.0
+    free_end_area_mm2 = _ring_area(state[-1])
+    if free_end_area_mm2 <= 1e-9:
+        return 0.0
+    return deficit_mm3 / free_end_area_mm2
 
 
 def find_sufficient_cycles(
@@ -440,8 +530,18 @@ def _apply_strike_3d(
     upper_die_radius_mm: float,
     reach_scale: float,
     closure_fraction: float,
+    stroke_progress: float = 1.0,
 ) -> list[list[float]]:
     """Clip the whole station-by-angle grid by one die strike.
+
+    ``stroke_progress`` (0..1) scales the bulge relaxation only -- at
+    ``stroke_progress=0`` (the die has not yet moved this operation) the
+    relaxation must contribute nothing, since there is nothing yet for
+    material to be displaced by; it ramps up to the full
+    ``reach_scale``/``closure_fraction``-scaled relaxation at
+    ``stroke_progress=1``. The rigid clip is unaffected by this parameter --
+    it already depends on ``support_mm``, which the caller has already
+    scaled by the same stroke progress.
 
     Two rigid, finite footprints act on every strike:
 
@@ -494,6 +594,11 @@ def _apply_strike_3d(
     segment_count = len(angles)
     new_grid = [list(row) for row in radii_grid]
 
+    # Bulge only ever ramps up with how far this operation's own stroke has
+    # actually progressed -- at stroke_progress=0 the die has not moved yet,
+    # so there is nothing for material to have been displaced by.
+    effective_closure_fraction = closure_fraction * max(0.0, min(stroke_progress, 1.0))
+
     # The raised-cosine bulge margins below must stay wide enough for the
     # angular/axial sampling grid to actually resolve them as a smooth taper:
     # an aspect-ratio bias and/or a low reach_scale can otherwise shrink a
@@ -503,12 +608,34 @@ def _apply_strike_3d(
     # in the rendered cross-section rather than a bulge.
     margin_floor_mm = max(stock_radius_mm * _MIN_MARGIN_FRACTION, 1e-6)
 
+    # Material flows toward the free (unclamped) end of the billet, not
+    # toward the clamp: a strike's own bulge margin reaches only "a couple
+    # footprint dimensions" backward (toward -X, the clamp) but reaches much
+    # further forward (toward +X, the free end), decaying smoothly with
+    # distance -- so a strike anywhere in the bar visibly, gradually nudges
+    # every station between it and the free end, not just its immediate
+    # neighbours, the same way real open-die forging pushes material
+    # progressively toward the unclamped end rather than the displaced
+    # volume only ever showing up as a lump at the very tip. Capped at the
+    # actual remaining room to the free end so the taper's own far edge
+    # lines up with (rather than needlessly overshooting past) it.
+    free_end_x = max(station_x) if station_x else center_x
+    forward_room_mm = max(free_end_x - center_x, margin_floor_mm)
+
+    def forward_margin_mm(backward_margin_mm: float) -> float:
+        return min(backward_margin_mm * _FORWARD_REACH_MULTIPLIER, forward_room_mm)
+
+    def margin_for(signed_offset: float, backward_margin_mm: float, forward_margin: float) -> float:
+        return forward_margin if signed_offset >= 0.0 else backward_margin_mm
+
     half_width_anvil = width_mm / 2.0
     anvil_axial_bias, anvil_tangential_bias = _footprint_bias(2.0 * axial_half_length, width_mm)
     influence_margin_anvil_mm = max(2.0 * half_width_anvil * (2.0 * anvil_tangential_bias) * reach_scale, margin_floor_mm)
-    axial_margin_mm = max(2.0 * axial_half_length * (2.0 * anvil_axial_bias) * reach_scale, margin_floor_mm)
+    axial_margin_backward_mm = max(2.0 * axial_half_length * (2.0 * anvil_axial_bias) * reach_scale, margin_floor_mm)
+    axial_margin_forward_mm = forward_margin_mm(axial_margin_backward_mm)
     disc_axial_bias, disc_tangential_bias = _footprint_bias(2.0 * disc_axial_half_length, 2.0 * upper_die_radius_mm)
-    disc_axial_margin_mm = max(2.0 * disc_axial_half_length * (2.0 * disc_axial_bias) * reach_scale, margin_floor_mm)
+    disc_axial_margin_backward_mm = max(2.0 * disc_axial_half_length * (2.0 * disc_axial_bias) * reach_scale, margin_floor_mm)
+    disc_axial_margin_forward_mm = forward_margin_mm(disc_axial_margin_backward_mm)
 
     def disc_half_width_at(axial_offset: float) -> float:
         return math.sqrt(max(0.0, upper_die_radius_mm**2 - axial_offset**2))
@@ -518,10 +645,14 @@ def _apply_strike_3d(
 
     # --- Striking die: a flat-faced circular disc, its lens-shaped taper
     # additionally cut off at disc_axial_half_length (+ margin) from the
-    # segment it targets.
+    # segment it targets. The rigid reach itself (disc_axial_half_length)
+    # stays symmetric and unchanged -- only the bulge margin beyond it is
+    # forward-biased.
     for station in range(station_count):
-        axial_offset = abs(station_x[station] - center_x)
-        if axial_offset > disc_axial_half_length + disc_axial_margin_mm + 1e-9:
+        signed_offset = station_x[station] - center_x
+        axial_offset = abs(signed_offset)
+        margin = margin_for(signed_offset, disc_axial_margin_backward_mm, disc_axial_margin_forward_mm)
+        if axial_offset > disc_axial_half_length + margin + 1e-9:
             continue  # far outside this strike's zone of influence -- untouched.
         touched.add(station)
         if axial_offset > disc_axial_half_length + 1e-9:
@@ -543,10 +674,12 @@ def _apply_strike_3d(
                 footprint_row[index] = True
 
     # --- Anvil: rectangular footprint, reaching axial_half_length (+
-    # margin) from die_length_mm -- unchanged from every previous version.
+    # forward-biased margin) from die_length_mm.
     for station in range(station_count):
-        axial_offset = abs(station_x[station] - center_x)
-        if axial_offset > axial_half_length + axial_margin_mm + 1e-9:
+        signed_offset = station_x[station] - center_x
+        axial_offset = abs(signed_offset)
+        margin = margin_for(signed_offset, axial_margin_backward_mm, axial_margin_forward_mm)
+        if axial_offset > axial_half_length + margin + 1e-9:
             continue  # far outside this strike's zone of influence -- untouched.
         touched.add(station)
         if axial_offset > axial_half_length + 1e-9:
@@ -574,13 +707,15 @@ def _apply_strike_3d(
     # volume solve), since this pass and the anvil pass below can never
     # touch the same ray (they occupy opposite hemispheres of sin(delta)).
     for station in touched_stations:
-        axial_offset = abs(station_x[station] - center_x)
+        signed_offset = station_x[station] - center_x
+        axial_offset = abs(signed_offset)
+        margin = margin_for(signed_offset, disc_axial_margin_backward_mm, disc_axial_margin_forward_mm)
         axial_beyond = max(0.0, axial_offset - disc_axial_half_length)
-        if axial_beyond >= disc_axial_margin_mm:
+        if axial_beyond >= margin:
             continue
         axial_factor = (
             1.0 if axial_beyond <= 0.0
-            else 0.5 * (1.0 + math.cos(math.pi * axial_beyond / disc_axial_margin_mm))
+            else 0.5 * (1.0 + math.cos(math.pi * axial_beyond / margin))
         )
         half_width = disc_half_width_at(min(axial_offset, disc_axial_half_length))
         influence_margin_disc_mm = max(2.0 * half_width * (2.0 * disc_tangential_bias) * reach_scale, margin_floor_mm)
@@ -604,17 +739,19 @@ def _apply_strike_3d(
             weight = axial_factor * tangential_factor
             if weight > 0.0:
                 current = row[index]
-                row[index] = current + weight * closure_fraction * (target_row[index] - current)
+                row[index] = current + weight * effective_closure_fraction * (target_row[index] - current)
 
     # Anvil bulge: the same bounded relaxation, on the anvil's hemisphere.
     for station in touched_stations:
-        axial_offset = abs(station_x[station] - center_x)
+        signed_offset = station_x[station] - center_x
+        axial_offset = abs(signed_offset)
+        margin = margin_for(signed_offset, axial_margin_backward_mm, axial_margin_forward_mm)
         axial_beyond = max(0.0, axial_offset - axial_half_length)
-        if axial_beyond >= axial_margin_mm:
+        if axial_beyond >= margin:
             continue
         axial_factor = (
             1.0 if axial_beyond <= 0.0
-            else 0.5 * (1.0 + math.cos(math.pi * axial_beyond / axial_margin_mm))
+            else 0.5 * (1.0 + math.cos(math.pi * axial_beyond / margin))
         )
         footprint_row = in_footprint[station]
         row = new_grid[station]
@@ -636,7 +773,7 @@ def _apply_strike_3d(
             weight = axial_factor * tangential_factor
             if weight > 0.0:
                 current = row[index]
-                row[index] = current + weight * closure_fraction * (target_row[index] - current)
+                row[index] = current + weight * effective_closure_fraction * (target_row[index] - current)
 
     return new_grid
 

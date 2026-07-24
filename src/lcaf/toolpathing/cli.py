@@ -71,8 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--material",
         choices=MATERIALS,
         default="steel",
-        help="Billet material -- together with --temperature, drives the preview's "
-        "deformation mechanics and the separate force estimate",
+        help="Billet material -- one generic band per family (plasticine/aluminum/steel) plus "
+        "several named grades (e.g. steel_4140, aluminum_7075, plasticine_soft); together with "
+        "--temperature, drives the preview's deformation mechanics and the separate force/"
+        "contact-pressure estimate",
     )
     parser.add_argument("--scale", type=float, default=1.0, help="Millimetres per input model unit")
     parser.add_argument("--axis", choices=("auto", "x", "y", "z"), default="auto", help="Billet longitudinal axis")
@@ -163,11 +165,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Converged at {used_cycles} cycle(s).")
     print(f"Wrote {len(plan.operations)} controller operations to {output}")
     if plan.operations:
-        peak_force_kn = max(row["estimated_force_kn"] for row in plan_force_report(plan.operations))
+        report = plan_force_report(plan.operations)
+        peak_force_kn = max(row["estimated_force_kn"] for row in report)
+        peak_pressure_mpa = max(row["estimated_contact_pressure_mpa"] for row in report)
         print(
-            f"Estimated peak forging force: {peak_force_kn:.1f} kN ({arguments.material} at "
-            f"{arguments.temperature:.0f} C) -- a separate slab-method estimate; it does not "
-            "affect the plan above and assumes rigid, indestructible dies."
+            f"Estimated peak forging force: {peak_force_kn:.1f} kN, peak die contact pressure: "
+            f"{peak_pressure_mpa:.1f} MPa ({arguments.material} at {arguments.temperature:.0f} C) "
+            "-- a separate slab-method estimate; it does not affect the plan above and assumes "
+            "rigid, indestructible dies."
         )
     for warning in plan.warnings:
         print(f"WARNING: {warning}")

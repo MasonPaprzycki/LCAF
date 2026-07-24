@@ -15,7 +15,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Sequence
 
-from .material import MATERIALS, plan_force_report
+from .material import MATERIAL_LABELS, MATERIALS, plan_force_report
 from .toolpath_slicer import (
     MachineLimits,
     SliceSettings,
@@ -26,6 +26,7 @@ from .toolpath_slicer import (
 )
 from .visualization import (
     anvil_side_support,
+    axial_trim_allowance_mm,
     die_contact_profile,
     disc_contact_profile,
     disc_rim_profile,
@@ -37,12 +38,19 @@ from .visualization import (
 
 # Presentation-only hints for the material picker -- not used by any
 # mechanics, purely to help a user pick a realistic target_temperature_c for
-# lcaf.toolpathing.material's own bands.
-_MATERIAL_TEMPERATURE_HINTS = {
+# lcaf.toolpathing.material's own bands. Keyed by family (the part of a
+# material key before its first "_"), since every grade of a family is
+# worked in roughly the same temperature range.
+_MATERIAL_FAMILY_TEMPERATURE_HINTS = {
     "plasticine": "Typically worked near room temperature, ~15-30 C.",
     "aluminum": "Commonly hot-forged around 400-500 C.",
     "steel": "Commonly hot-forged around 900-1250 C.",
 }
+
+
+def _material_temperature_hint(material_key: str) -> str:
+    family = material_key.split("_", 1)[0]
+    return _MATERIAL_FAMILY_TEMPERATURE_HINTS.get(family, "")
 
 
 class ForgePreview(ttk.Frame):
@@ -58,6 +66,8 @@ class ForgePreview(ttk.Frame):
     die = "#ffb454"
     upper_die = "#bcdfff"
     strike = "#e77878"
+    trim_allowance = "#c98a2c"
+    trim_line = "#ffcf5c"
 
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master)
@@ -315,8 +325,18 @@ class ForgePreview(ttk.Frame):
         sections = self.plan.sections
         x_values = [section.x_model_mm for section in sections]
         stock_half_length = self.plan.recommended_stock_length_mm / 2.0
+        # Forging conserves volume exactly: whatever a die's local bulge does
+        # not reabsorb nearby must reappear as extra length at the free
+        # (+X) end, ready to be sawn off once forging is complete -- see
+        # axial_trim_allowance_mm's own docstring for the volume balance
+        # this comes from.
+        axial_extension_mm = axial_trim_allowance_mm(
+            self.plan, self.operation_index, self.motion_progress, radial_segments=self.mesh_quality
+        )
+        free_end_x = sections[-1].x_model_mm
+        extension_x = free_end_x + axial_extension_mm
         min_x = min(min(x_values), -stock_half_length)
-        max_x = max(max(x_values), stock_half_length)
+        max_x = max(max(x_values), stock_half_length, extension_x)
         x_range = max(max_x - min_x, 1.0)
         centre_y = top + height * 0.5
         radial_scale = height * 0.31 / max(self.stock_radius, 1.0)
@@ -347,6 +367,25 @@ class ForgePreview(ttk.Frame):
         self.canvas.create_polygon(*material_polygon, fill=self.stock, outline=self.stock_edge, width=2)
         self.canvas.create_polygon(*target_polygon, fill=self.target_fill, outline=self.target, width=2, stipple="gray25")
 
+        if axial_extension_mm > 0.0:
+            # The trim-allowance stub: a straight extrusion of the free
+            # end's own current top/bottom extent out to extension_x --
+            # material volume conservation says must be there, ready to be
+            # sawn off once forging is complete.
+            free_top = centre_y - max(z for _, z in state[-1]) * radial_scale
+            free_bottom = centre_y - min(z for _, z in state[-1]) * radial_scale
+            free_x_px = to_x(free_end_x)
+            extension_x_px = to_x(extension_x)
+            self.canvas.create_polygon(
+                free_x_px, free_top, extension_x_px, free_top,
+                extension_x_px, free_bottom, free_x_px, free_bottom,
+                fill=self.trim_allowance, outline=self.stock_edge, width=2,
+            )
+            self.canvas.create_line(
+                free_x_px, free_top - 6, free_x_px, free_bottom + 6,
+                fill=self.trim_line, width=2, dash=(5, 4),
+            )
+
         selected = sections[self.selected_station]
         selected_x = to_x(selected.x_model_mm)
         self.canvas.create_line(selected_x, top + 24, selected_x, top + height - 22, fill=self.strike, width=2)
@@ -376,7 +415,8 @@ class ForgePreview(ttk.Frame):
                 f"A={float(operation['rotation']):.0f}°  "
                 f"pass {operation['metadata']['strike_pass']}/{operation['metadata']['strike_pass_count']}"
             )
-        self.canvas.create_text(left + 10, top + height - 4, anchor="sw", text=f"red: remaining stock   green hatch: target profile   gold: lower die (moves)  |  {step_text}", fill="#d9e2f2", font=("Segoe UI", 9))
+        trim_text = f"  |  amber: trim allowance {axial_extension_mm:.1f} mm (saw off)" if axial_extension_mm > 0.0 else ""
+        self.canvas.create_text(left + 10, top + height - 4, anchor="sw", text=f"red: remaining stock   green hatch: target profile   gold: lower die (moves)  |  {step_text}{trim_text}", fill="#d9e2f2", font=("Segoe UI", 9))
 
     def _selected_rotation(self) -> float:
         return self.selected_rotation
@@ -393,6 +433,8 @@ class Forge3DPreview(ttk.Frame):
     die = "#ffbd4a"
     upper_die = "#bcdfff"
     grid = "#26344a"
+    trim_allowance = "#c98a2c"
+    trim_line = "#ffcf5c"
 
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master)
@@ -523,7 +565,19 @@ class Forge3DPreview(ttk.Frame):
             radial_resample(section.polygon_yz_mm, radial_segments=segment_count)
             for section in sections
         ]
-        project, depth = self._projector(width, height, sections)
+        # Forging conserves volume exactly: whatever a die's local bulge does
+        # not reabsorb nearby must reappear as extra length at the free
+        # (+X) end, ready to be sawn off once forging is complete -- see
+        # axial_trim_allowance_mm's own docstring for the volume balance
+        # this comes from.
+        axial_extension_mm = axial_trim_allowance_mm(
+            self.plan, self.operation_index, self.motion_progress, radial_segments=segment_count
+        )
+        free_end_x = sections[-1].x_model_mm
+        extension_x = free_end_x + axial_extension_mm
+        project, depth = self._projector(
+            width, height, sections, extra_max_x=extension_x if axial_extension_mm > 0.0 else None
+        )
 
         faces: list[tuple[float, tuple[float, ...], str]] = []
         for station_index in range(len(sections) - 1):
@@ -539,8 +593,40 @@ class Forge3DPreview(ttk.Frame):
                 shade = self.stock_faces[radial_index % len(self.stock_faces)]
                 faces.append((sum(depth(*corner) for corner in corners) / 4.0, tuple(value for corner in corners for value in project(*corner)), shade))
 
+        if axial_extension_mm > 0.0:
+            # The trim-allowance stub: a straight extrusion of the free
+            # end's own current ring out to extension_x, since that ring's
+            # own shape is the most honest available guess at what the
+            # (not-yet-locally-reabsorbed) excess material actually looks
+            # like there. Rendered in a distinct amber so it reads as "to be
+            # sawn off," not more of the same forged stock.
+            free_ring = material_rings[-1]
+            for radial_index in range(segment_count):
+                next_radial = (radial_index + 1) % segment_count
+                corners = (
+                    (free_end_x, *free_ring[radial_index]),
+                    (free_end_x, *free_ring[next_radial]),
+                    (extension_x, *free_ring[next_radial]),
+                    (extension_x, *free_ring[radial_index]),
+                )
+                faces.append((
+                    sum(depth(*corner) for corner in corners) / 4.0,
+                    tuple(value for corner in corners for value in project(*corner)),
+                    self.trim_allowance,
+                ))
+
         for _, coordinates, color in sorted(faces, key=lambda face: face[0]):
             canvas.create_polygon(*coordinates, fill=color, outline="#6f1820", width=1)
+
+        if axial_extension_mm > 0.0:
+            # A dashed "cut here" ring right at the target's own free end,
+            # where the trim-allowance stub begins.
+            free_ring = material_rings[-1]
+            coordinates = [value for y, z in free_ring for value in project(free_end_x, y, z)]
+            canvas.create_line(
+                *coordinates, coordinates[0], coordinates[1],
+                fill=self.trim_line, width=2, dash=(6, 4),
+            )
 
         # The target is intentionally rendered as an overlaid green wireframe
         # so it remains visible even while it sits inside the red stock solid.
@@ -605,9 +691,14 @@ class Forge3DPreview(ttk.Frame):
             self.canvas.create_line(centre_x, centre_y, end_x, end_y, fill=color, width=3)
             self.canvas.create_text(end_x, end_y, text=label, fill=color, font=("Segoe UI", 9, "bold"))
 
-    def _projector(self, width: int, height: int, sections: tuple) -> tuple:
+    def _projector(self, width: int, height: int, sections: tuple, extra_max_x: float | None = None) -> tuple:
         min_x = min(section.x_model_mm for section in sections)
         max_x = max(section.x_model_mm for section in sections)
+        if extra_max_x is not None:
+            # The axial trim-allowance stub (see _draw_axial_extension) can
+            # extend past the last real section -- the camera must scale to
+            # fit that too, or the stub would render past the frame edge.
+            max_x = max(max_x, extra_max_x)
         span_x = max(max_x - min_x, 1.0)
         yaw = math.radians(self.yaw_deg)
         pitch = math.radians(self.pitch_deg)
@@ -854,20 +945,83 @@ class Forge3DPreview(ttk.Frame):
         )
 
 
-class ForceReadout(ttk.Frame):
-    """A read-only tab reporting the separate, independent forging-force estimate.
+class _SeriesPlot(tk.Canvas):
+    """A minimal line-plot of one numeric series, with a marker for the
+    current step. Shared by the force and contact-pressure plots below so
+    neither duplicates the other's drawing code."""
 
-    This never feeds the deformation preview or the plan above it -- it is a
+    def __init__(self, master: tk.Widget, *, background: str, grid: str, text: str, line: str, marker: str, unit: str, empty_message: str, height: int = 160) -> None:
+        super().__init__(master, bg=background, highlightthickness=0, height=height)
+        self._grid, self._text, self._line, self._marker = grid, text, line, marker
+        self._unit = unit
+        self._empty_message = empty_message
+        self.values: tuple[float, ...] = ()
+        self.current_index = 0
+        self.bind("<Configure>", lambda _event: self.redraw())
+
+    def set_values(self, values: tuple[float, ...], current_index: int) -> None:
+        self.values = values
+        self.current_index = current_index
+        self.redraw()
+
+    def set_current_index(self, current_index: int) -> None:
+        self.current_index = current_index
+        self.redraw()
+
+    def redraw(self) -> None:
+        self.delete("all")
+        width = max(self.winfo_width(), 1)
+        height = max(self.winfo_height(), 1)
+        if not self.values:
+            self.create_text(width / 2, height / 2, text=self._empty_message, fill=self._text, font=("Segoe UI", 10))
+            return
+
+        margin = 30
+        plot_width = max(width - 2 * margin, 1)
+        plot_height = max(height - 2 * margin, 1)
+        peak = max(self.values) if max(self.values) > 0 else 1.0
+        count = len(self.values)
+
+        for fraction in (0.0, 0.5, 1.0):
+            y = margin + plot_height * (1.0 - fraction)
+            self.create_line(margin, y, margin + plot_width, y, fill=self._grid)
+            self.create_text(
+                margin - 4, y, text=f"{peak * fraction:.0f} {self._unit}", fill=self._text, anchor="e", font=("Segoe UI", 8),
+            )
+
+        def point(index: int, value: float) -> tuple[float, float]:
+            x = margin + (plot_width * index / (count - 1) if count > 1 else 0.0)
+            y = margin + plot_height * (1.0 - value / peak)
+            return x, y
+
+        coordinates = [coordinate for index, value in enumerate(self.values) for coordinate in point(index, value)]
+        if count > 1:
+            self.create_line(*coordinates, fill=self._line, width=2)
+        current_index = max(0, min(self.current_index, count - 1))
+        marker_x, marker_y = point(current_index, self.values[current_index])
+        self.create_oval(marker_x - 4, marker_y - 4, marker_x + 4, marker_y + 4, fill=self._marker, outline="")
+        self.create_line(marker_x, margin, marker_x, margin + plot_height, fill=self._marker, dash=(3, 3))
+
+
+class ForceReadout(ttk.Frame):
+    """A read-only tab reporting the separate, independent forging force and
+    die contact pressure (stress) estimates.
+
+    Neither feeds the deformation preview or the plan above it -- both are a
     standalone slab-method calculation (see ``lcaf.toolpathing.material``)
     from the same material/temperature/die geometry, computed purely for
     process-planning information, assuming rigid, indestructible dies able
-    to supply whatever force it reports.
+    to supply whatever force/pressure it reports. Force alone does not say
+    how hard the die presses -- the same force spread over a larger contact
+    patch needs far less stress to induce plastic flow than the same force
+    concentrated over a small one, so both are shown.
     """
 
     background = "#101827"
     grid = "#26344a"
     text = "#d9e2f2"
     line = "#ffb454"
+    stress_line = "#7ec8ff"
     marker = "#4fc3a1"
 
     def __init__(self, master: tk.Widget) -> None:
@@ -878,11 +1032,15 @@ class ForceReadout(ttk.Frame):
         header = ttk.Label(
             self,
             text=(
-                "Estimated forging force per strike -- a separate slab-method (friction-hill) "
-                "hand-calculation from the chosen material/temperature and die contact geometry, "
-                "not a simulation. It never affects the deformation preview or the planned "
-                "coordinates above: dies are treated as rigid and able to supply whatever force "
-                "is shown here."
+                "Estimated forging force and die contact pressure per strike -- a separate "
+                "slab-method (friction-hill) hand-calculation from the chosen material/"
+                "temperature and die contact geometry, not a simulation. The contact pressure "
+                "is the stress the die must actually apply to induce plastic flow in the "
+                "material at that geometry -- force alone does not capture this, since the same "
+                "force concentrated over a small contact patch needs far more stress than the "
+                "same force spread over a large one. Neither affects the deformation preview or "
+                "the planned coordinates above: dies are treated as rigid and able to supply "
+                "whatever force/pressure is shown here."
             ),
             foreground="#9fb0c9",
             wraplength=1000,
@@ -892,24 +1050,46 @@ class ForceReadout(ttk.Frame):
         summary = ttk.Frame(self)
         summary.pack(fill="x", pady=(0, 8))
         self.current_force_text = tk.StringVar(value="Current step: —")
-        self.peak_force_text = tk.StringVar(value="Peak across plan: —")
-        ttk.Label(summary, textvariable=self.current_force_text, font=("Segoe UI", 12, "bold")).pack(side="left")
-        ttk.Label(summary, textvariable=self.peak_force_text, foreground="#9fb0c9").pack(side="left", padx=(24, 0))
+        self.peak_force_text = tk.StringVar(value="Peak force across plan: —")
+        self.current_stress_text = tk.StringVar(value="Contact pressure: —")
+        self.peak_stress_text = tk.StringVar(value="Peak pressure across plan: —")
+        force_row = ttk.Frame(summary)
+        force_row.pack(fill="x")
+        ttk.Label(force_row, textvariable=self.current_force_text, font=("Segoe UI", 12, "bold")).pack(side="left")
+        ttk.Label(force_row, textvariable=self.peak_force_text, foreground="#9fb0c9").pack(side="left", padx=(24, 0))
+        stress_row = ttk.Frame(summary)
+        stress_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(stress_row, textvariable=self.current_stress_text, font=("Segoe UI", 12, "bold")).pack(side="left")
+        ttk.Label(stress_row, textvariable=self.peak_stress_text, foreground="#9fb0c9").pack(side="left", padx=(24, 0))
 
-        self.canvas = tk.Canvas(self, bg=self.background, highlightthickness=0, height=220)
-        self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda _event: self._redraw())
+        ttk.Label(self, text="Force per strike (kN)", foreground=self.text).pack(anchor="w", pady=(4, 0))
+        self.force_plot = _SeriesPlot(
+            self, background=self.background, grid=self.grid, text=self.text, line=self.line,
+            marker=self.marker, unit="kN", empty_message="Generate a preview to see the force estimate.",
+        )
+        self.force_plot.pack(fill="both", expand=True)
+
+        ttk.Label(self, text="Die contact pressure needed for plastic flow (MPa)", foreground=self.text).pack(anchor="w", pady=(8, 0))
+        self.stress_plot = _SeriesPlot(
+            self, background=self.background, grid=self.grid, text=self.text, line=self.stress_line,
+            marker=self.marker, unit="MPa", empty_message="Generate a preview to see the contact-pressure estimate.",
+        )
+        self.stress_plot.pack(fill="both", expand=True)
 
     def show_plan(self, plan: ToolpathPlan, _settings: SliceSettings) -> None:
         self.report = plan_force_report(plan.operations) if plan.operations else ()
         self.current_index = 0
-        peak = max((row["estimated_force_kn"] for row in self.report), default=0.0)
-        self.peak_force_text.set(f"Peak across plan: {peak:.1f} kN")
-        self._redraw()
+        forces = tuple(row["estimated_force_kn"] for row in self.report)
+        pressures = tuple(row["estimated_contact_pressure_mpa"] for row in self.report)
+        self.peak_force_text.set(f"Peak force across plan: {max(forces, default=0.0):.1f} kN")
+        self.peak_stress_text.set(f"Peak pressure across plan: {max(pressures, default=0.0):.1f} MPa")
+        self.force_plot.set_values(forces, self.current_index)
+        self.stress_plot.set_values(pressures, self.current_index)
 
     def show_operation(self, operation_index: int, _progress: float) -> None:
         if not self.report:
             self.current_force_text.set("Current step: —")
+            self.current_stress_text.set("Contact pressure: —")
             return
         self.current_index = max(0, min(operation_index, len(self.report) - 1))
         row = self.report[self.current_index]
@@ -917,45 +1097,9 @@ class ForceReadout(ttk.Frame):
             f"Current step: {row['estimated_force_kn']:.1f} kN "
             f"({row['material']} at {row['target_temperature_c']:.0f} C)"
         )
-        self._redraw()
-
-    def _redraw(self) -> None:
-        canvas = self.canvas
-        canvas.delete("all")
-        width = max(canvas.winfo_width(), 1)
-        height = max(canvas.winfo_height(), 1)
-        if not self.report:
-            canvas.create_text(
-                width / 2, height / 2, text="Generate a preview to see the force estimate.",
-                fill=self.text, font=("Segoe UI", 10),
-            )
-            return
-
-        margin = 30
-        plot_width = max(width - 2 * margin, 1)
-        plot_height = max(height - 2 * margin, 1)
-        forces = [row["estimated_force_kn"] for row in self.report]
-        peak = max(forces) if max(forces) > 0 else 1.0
-        count = len(forces)
-
-        for fraction in (0.0, 0.5, 1.0):
-            y = margin + plot_height * (1.0 - fraction)
-            canvas.create_line(margin, y, margin + plot_width, y, fill=self.grid)
-            canvas.create_text(
-                margin - 4, y, text=f"{peak * fraction:.0f} kN", fill=self.text, anchor="e", font=("Segoe UI", 8),
-            )
-
-        def point(index: int, force: float) -> tuple[float, float]:
-            x = margin + (plot_width * index / (count - 1) if count > 1 else 0.0)
-            y = margin + plot_height * (1.0 - force / peak)
-            return x, y
-
-        coordinates = [coordinate for index, force in enumerate(forces) for coordinate in point(index, force)]
-        if count > 1:
-            canvas.create_line(*coordinates, fill=self.line, width=2)
-        marker_x, marker_y = point(self.current_index, forces[self.current_index])
-        canvas.create_oval(marker_x - 4, marker_y - 4, marker_x + 4, marker_y + 4, fill=self.marker, outline="")
-        canvas.create_line(marker_x, margin, marker_x, margin + plot_height, fill=self.marker, dash=(3, 3))
+        self.current_stress_text.set(f"Contact pressure: {row['estimated_contact_pressure_mpa']:.1f} MPa")
+        self.force_plot.set_current_index(self.current_index)
+        self.stress_plot.set_current_index(self.current_index)
 
 
 class ToolpathApp(tk.Tk):
@@ -996,6 +1140,7 @@ class ToolpathApp(tk.Tk):
         self.clamped_end = tk.StringVar(value="min")
         self.temperature = tk.StringVar(value="0")
         self.material = tk.StringVar(value="steel")
+        self.material_label = tk.StringVar(value=MATERIAL_LABELS["steel"])
         self.die_shape = tk.StringVar(value=self.DIE_SHAPE_RECTANGULAR)
         self.die_length = tk.StringVar(value="")
         self.die_width = tk.StringVar(value="")
@@ -1173,10 +1318,10 @@ class ToolpathApp(tk.Tk):
         ttk.Label(material_field, text="Billet material").pack(anchor="w")
         self.material_picker = ttk.Combobox(
             material_field,
-            textvariable=self.material,
-            values=MATERIALS,
+            textvariable=self.material_label,
+            values=[MATERIAL_LABELS[key] for key in MATERIALS],
             state="readonly",
-            width=15,
+            width=32,
         )
         self.material_picker.pack(fill="x")
         self.material_picker.bind("<<ComboboxSelected>>", self._on_material_changed)
@@ -1372,7 +1517,10 @@ class ToolpathApp(tk.Tk):
         self.status.set("Example loaded. Generate a preview, then use Play to watch the die-envelope animation.")
 
     def _on_material_changed(self, _event: tk.Event | None = None) -> None:
-        self.material_info.set(_MATERIAL_TEMPERATURE_HINTS.get(self.material.get(), ""))
+        label = self.material_label.get()
+        key = next((candidate for candidate in MATERIALS if MATERIAL_LABELS[candidate] == label), "steel")
+        self.material.set(key)
+        self.material_info.set(_material_temperature_hint(key))
 
     def _on_die_shape_changed(self, _event: tk.Event | None = None) -> None:
         radiused = self.die_shape.get() == self.DIE_SHAPE_RADIUSED
@@ -1463,9 +1611,18 @@ class ToolpathApp(tk.Tk):
             f"Preview ready: {len(self.plan.sections)} radial segments, "
             f"{len(self.plan.rotations_deg)} strikes/segment, {len(self.plan.operations)} strike operations{cycles_note}."
         )
+        final_trim_allowance_mm = axial_trim_allowance_mm(self.plan, len(self.plan.operations) - 1, 1.0)
+        trim_note = (
+            f" This stock length still leaves ~{final_trim_allowance_mm:,.1f} mm to saw off the free end once "
+            "forging is complete (volume conservation pushes whatever the local bulge cannot reabsorb out that "
+            "end -- see the amber stub in the 2D/3D previews)."
+            if final_trim_allowance_mm > 0.05
+            else " Forging conserves volume exactly, with no leftover length to trim at this stock length."
+        )
         self.stock_length_info.set(
             f"Target volume ~{self.plan.target_volume_mm3:,.0f} mm³ → at this stock radius, cut stock "
             f"~{self.plan.recommended_stock_length_mm:,.1f} mm long to match it (no volume to create or discard)."
+            f"{trim_note}"
         )
 
     def _set_playback_enabled(self, enabled: bool) -> None:

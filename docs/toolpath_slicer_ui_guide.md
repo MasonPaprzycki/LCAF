@@ -83,21 +83,52 @@ visible, if you want an unobstructed view of the deformation itself. The same
 slider sets how many radial samples the deformed-geometry preview uses --
 higher values render a smoother deformed surface at some extra redraw cost.
 
-An unconfigured lower-die length keeps every strike's rigid effect confined
-to exactly the one segment it targets -- nothing deforms in a segment a
-visible die isn't touching unless you explicitly set a `die_length_mm` that
-reaches further (its bulge margin can still nudge the immediately adjacent
-segment toward, but never past, that segment's own eventual target).
+An unconfigured lower-die length keeps every strike's *rigid* effect
+confined to exactly the one segment it targets -- nothing is forced to that
+segment's exact commanded depth in a segment a visible die isn't touching
+unless you explicitly set a `die_length_mm` that reaches further. Its
+*bulge* margin reaches further than that regardless: only "a couple of
+footprint dimensions" back toward the clamp, but much further forward
+toward the free end, fading smoothly with distance -- so a strike visibly,
+gradually nudges every segment between it and the free end, not just its
+immediate neighbour, the same way real material keeps flowing toward the
+unclamped end rather than the clamped one. See
+[Forward propagation](toolpath_slicer.md#forward-propagation) for the
+underlying mechanic.
+
+Both tabs also render an **amber trim allowance**: forging conserves volume
+exactly, so whatever the local bulge above cannot reabsorb nearby must
+reappear as extra length at the target's own free end, exactly the way a
+real bar upsets (gets longer) as its cross-section is squeezed down without
+also being cut shorter. Thanks to the same forward propagation, this reads
+as a smooth taper flowing out of the forged material rather than an
+abrupt block glued onto the end. A dashed line marks exactly where the
+target's own defined length ends and this allowance begins -- material a
+saw trims off once forging is complete. Its *total* is a fixed quantity
+set entirely by your stock length and the target's own volume -- forward
+propagation changes how gradually that same total reads visually, not the
+total itself. It grows as strikes progress and settles once the shape has
+converged; see
+[Volume conservation and the trim allowance](toolpath_slicer.md#volume-conservation-and-the-trim-allowance)
+for the underlying volume balance. It is a preview/reporting quantity only:
+it is never written into the exported JSONL and never changes a planned
+strike's own coordinates.
 
 Select the **Force estimate** tab to see a separate, independent estimate of
-the forging force each strike needs, computed from the chosen material/
-temperature and the strike's own die contact geometry -- a standard
-slab-method (friction-hill) hand calculation, not a simulation. It never
-feeds back into the deformation preview or the planned coordinates: dies
-are treated as rigid and able to supply whatever force is shown. The tab
-reports the current step's estimate (updating live during playback), the
-peak estimate across the whole plan, and a line plot of every step's
-estimate with the current step marked.
+both the forging **force** and the die **contact pressure (stress)** each
+strike needs, computed from the chosen material/temperature and the
+strike's own die contact geometry -- a standard slab-method (friction-hill)
+hand calculation, not a simulation. Force and pressure are not the same
+question: the same total force concentrated over a small contact patch
+needs far higher stress to induce plastic flow than the same force spread
+over a large one, so a die/press capacity check needs the force number while
+a "will this actually deform the material" check needs the pressure number.
+Neither feeds back into the deformation preview or the planned coordinates:
+dies are treated as rigid and able to supply whatever force/pressure is
+shown. The tab reports the current step's force and pressure (updating live
+during playback), the peak of each across the whole plan, and a separate
+line plot for force (kN) and for contact pressure (MPa), each with the
+current step marked.
 
 ## Choose a target
 
@@ -154,16 +185,24 @@ chooses its largest bounding-box dimension.
   whichever end you pick here, regardless of how the source mesh was
   authored -- see the axis convention in
   [toolpath_slicer.md](toolpath_slicer.md).
-- **Billet material**: `plasticine`, `aluminum`, or `steel`. Together with
-  **Target temperature**, this drives how convincingly the preview's
-  deformation bulges/settles and how many strikes/cycles it takes to fully
-  converge (cold, stiff material spreads less per strike and needs more
-  hits, exactly like real forging) and the separate estimate on the
+- **Billet material**: a dropdown of named materials grouped by family --
+  a generic `Plasticine`/`Aluminum`/`Steel` band per family, plus several
+  specific grades within each (e.g. `Steel 1018 (mild/low-carbon)`,
+  `Steel 4140 (chromoly alloy)`, `Steel 304 (austenitic stainless)`,
+  `Aluminum 1100 (pure, dead-soft)`, `Aluminum 6061 (structural)`,
+  `Aluminum 7075 (aerospace, high-strength)`, `Plasticine -- soft grade`,
+  `Plasticine -- hard grade`). Together with **Target temperature**, the
+  chosen grade drives how convincingly the preview's deformation
+  bulges/settles and how many strikes/cycles it takes to fully converge
+  (cold, stiff material spreads less per strike and needs more hits, exactly
+  like real forging) and the separate force/contact-pressure estimate on the
   **Force estimate** tab -- see
   [Material and temperature](toolpath_slicer.md#material-and-temperature)
-  for the underlying model. A hint under the picker shows a realistic
-  temperature range for the chosen material. Neither setting changes the
-  planned strike coordinates or the target's final geometry.
+  for the underlying model, including how each named grade's numbers were
+  chosen (order-of-magnitude engineering estimates, not sourced alloy
+  datasheets). A hint under the picker shows a realistic temperature range
+  for the chosen material's family. Neither setting changes the planned
+  strike coordinates or the target's final geometry.
 
 ## Set the die geometry
 
@@ -240,6 +279,9 @@ that length so the constant-volume model is never asked to remove volume
 that has nowhere to go, or add volume that was never there. If it comes out
 much shorter or longer than the target's own axial extent, that is a sign the
 chosen stock radius is a poor match for the target and worth revisiting.
+The same line also reports the expected **trim allowance** left over once
+forging finishes if you instead start from the mesh's own (typically
+longer) axial extent -- the amber stub described above, quantified in mm.
 
 ## Read validation errors before exporting
 
@@ -251,13 +293,21 @@ radius even when its four faces all fit, since only those four discrete
 rotations are actually struck. Correct the setup or fixture (usually a
 larger stock radius) instead of looking for an override.
 
-The current visualisation is a computational-geometry envelope. Material and
-temperature now shape that geometry more convincingly and drive a separate
-force estimate, but this remains computational geometry, not a simulation: it
-does not predict true material flow, flash, springback, die compliance, or
-collisions. Treat its animation as a toolpath review aid. Review the JSONL,
-prove it off-material, and use normal ForgeBrain/LinuxCNC safety procedures
-before any physical motion.
+The current visualisation is a computational-geometry envelope, not a
+forming simulation -- only the exported strike coordinates themselves come
+from an exact geometric construction. The animated bulge, forward taper,
+and trim-allowance stub are a hand-tuned visualization heuristic with no
+plasticity/FEM model behind them; the material/temperature picker and the
+force/contact-pressure estimate make that heuristic and that separate
+hand-calculation more convincing and more granular, not more physically
+real. None of it predicts true material flow, flash, springback, die
+compliance, friction distribution, strain hardening, in-process temperature
+change, or tooling/fixture collisions -- see [Limits of the
+computational-geometry model](toolpath_slicer.md#limits-of-the-computational-geometry-model)
+for the full list. Treat its animation, and the force/pressure numbers, as
+toolpath review and process-planning aids only. Review the JSONL, prove it
+off-material, and use normal ForgeBrain/LinuxCNC safety procedures before
+any physical motion.
 
 ## Export and inspect JSONL
 

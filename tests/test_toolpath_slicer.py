@@ -17,6 +17,7 @@ from lcaf.toolpathing.toolpath_slicer import (
 )
 from lcaf.toolpathing.visualization import (
     anvil_side_support,
+    axial_trim_allowance_mm,
     die_cap,
     find_sufficient_cycles,
     material_cross_section,
@@ -532,22 +533,27 @@ class ToolpathSlicerTests(unittest.TestCase):
         # (at x=-8), rigidly holds segment 1 (at x=-4, 4 mm away)...
         self.assertAlmostEqual(after[0][36][1], -10.0, places=5)
         self.assertAlmostEqual(after[1][36][1], -10.0, places=5)
-        # ...but this anvil's own footprint is axially elongated (9 mm long,
-        # only 6 mm wide): the confinement-weighted bulge model now biases
-        # its spread toward the tangential direction it is *narrow* in
-        # (already demonstrated above -- segment 1's disc pole reaches its
-        # full tangential target), not further axially past its own already-
-        # long rigid reach, so segment 3 (12 mm away) falls outside its
-        # (now smaller) axial bulge margin regardless of material/temperature
-        # and is left untouched -- see test_anvil_aspect_ratio_biases_bulge_direction
-        # for a direct isolation of this effect.
-        self.assertAlmostEqual(after[3][12][1], 10.0, places=5)
-        self.assertAlmostEqual(after[3][36][1], -10.0, places=5)
+        # ...and the disc's own bulge margin reaches forward (+X, toward the
+        # free end) much further than it reaches backward, decaying
+        # smoothly with distance rather than cutting off sharply -- material
+        # genuinely propagates toward the free end across the whole
+        # remaining bar (see test_bulge_propagates_further_toward_the_free_end_than_the_clamp),
+        # so even segment 3 (12 mm away) shows a small, fading nudge, not
+        # zero.
+        self.assertLess(after[3][12][1], 10.0)
+        self.assertGreater(after[3][12][1], 9.5)
+        self.assertLess(after[3][36][1], -9.0)
+        self.assertGreater(after[3][36][1], -10.0)
 
-        # Segment 4 (16 mm away) is genuinely outside the anvil's length
-        # plus its bulge margin and is left completely untouched.
-        self.assertAlmostEqual(after[4][12][1], 10.0, places=5)
-        self.assertAlmostEqual(after[4][36][1], -10.0, places=5)
+        # Segment 4 (16 mm away) shows a smaller nudge still than segment 3
+        # -- the forward bulge margin decays smoothly with distance rather
+        # than cutting off sharply, so reach fades but is never structurally
+        # capped at some fixed number of segments the way the old, purely
+        # symmetric margin was.
+        self.assertLess(after[4][12][1], 10.0)
+        self.assertGreater(after[4][12][1], after[3][12][1])
+        self.assertLess(after[4][36][1], -9.5)
+        self.assertLess(after[4][36][1], after[3][36][1])
 
     def test_die_cap_blends_flat_centre_into_corner_radius(self) -> None:
         # half_width=3, corner_radius=2: flat out to |t|<=1, then a circular
@@ -740,9 +746,14 @@ class ToolpathSlicerTests(unittest.TestCase):
         # Segment 1 is never pulled down to segment 0's own commanded depth
         # (rigid spillover) -- at most it is nudged toward its own target.
         self.assertNotAlmostEqual(after[1][12][1], 7.5, places=1)
-        # Segments far enough away are left completely untouched.
-        self.assertAlmostEqual(after[3][12][1], 10.0, places=5)
-        self.assertAlmostEqual(after[4][12][1], 10.0, places=5)
+        # Segments further away show a progressively smaller nudge -- the
+        # bulge margin reaches forward (+X) across the whole remaining bar,
+        # decaying smoothly with distance rather than cutting off sharply
+        # (see test_bulge_propagates_further_toward_the_free_end_than_the_clamp) --
+        # never zero, but never the rigid spillover ruled out above either.
+        self.assertLess(after[3][12][1], 10.0)
+        self.assertLess(after[4][12][1], 10.0)
+        self.assertGreater(after[4][12][1], after[3][12][1])
 
     def test_no_levitation_across_a_full_rotation_sweep(self) -> None:
         # Reproduces, then closes, the reported "upper die floats clear of
@@ -941,36 +952,77 @@ class ToolpathSlicerTests(unittest.TestCase):
     def test_anvil_aspect_ratio_biases_which_direction_bulge_reaches_further(self) -> None:
         # Same axial length (die_length_mm=9) on both anvils, only the width
         # differs: a narrow anvil is biased to spread tangentially instead of
-        # reaching further axially, so it does *not* nudge segment 3 (12 mm
-        # away) at all; a wide anvil is biased the other way and does reach
-        # it -- nudging it partway toward (never all the way to, in just one
-        # strike) its own eventual target. material/temperature pinned hot
-        # (formability close to 1) so this isolates the geometric aspect-
-        # ratio effect from the separate material-driven reach scaling
-        # covered elsewhere.
-        def segment_3_anvil_pole(die_width_mm: float) -> float:
-            plan = ToolpathSlicer(
-                box_mesh(),
-                SliceSettings(
-                    stock_radius_mm=10,
-                    radial_segments=5,
-                    strikes_per_segment=4,
-                    max_reduction_per_strike_mm=3,
-                    die_contact_z_mm=10,
-                    die_width_mm=die_width_mm,
-                    die_length_mm=9,
-                    material="aluminum",
-                    target_temperature_c=450.0,
-                ),
-                self.continuous_limits,
-            ).plan()
-            after = material_cross_section(plan, station_index=3, operation_index=0, operation_progress=1.0)
-            return after[36][1]
+        # reaching further axially, a wide one the other way. Checked
+        # *backward* (toward -X, the clamp) specifically, since forward
+        # (+X) reach is now dominated by the much larger forward-propagation
+        # multiplier regardless of aspect ratio (see
+        # test_bulge_propagates_further_toward_the_free_end_than_the_clamp) --
+        # this isolates the pure aspect-ratio effect from that separate
+        # mechanic by calling _apply_strike_3d directly against a
+        # synthetic, evenly-spaced station grid with a uniform target,
+        # striking the middle station and reading the immediately-backward
+        # one, rather than relying on a full plan's own segment-major strike
+        # ordering (which always finishes every backward segment's own
+        # dedicated strikes before an even earlier operation could isolate
+        # this).
+        from lcaf.toolpathing.visualization import _apply_strike_3d
 
-        self.assertAlmostEqual(segment_3_anvil_pole(2.0), -10.0, places=5)
-        wide_result = segment_3_anvil_pole(20.0)
-        self.assertGreater(wide_result, -10.0)
-        self.assertLess(wide_result, -5.0)
+        station_x = (0.0, 4.0, 8.0, 12.0, 16.0)
+        angles = tuple(2.0 * math.pi * index / 48 for index in range(48))
+        stock_radius_mm = 10.0
+        target_radii_grid = tuple(tuple(5.0 for _ in angles) for _ in station_x)
+
+        def backward_station_anvil_pole(die_width_mm: float) -> float:
+            radii_grid = [[stock_radius_mm] * 48 for _ in station_x]
+            new_grid = _apply_strike_3d(
+                radii_grid, angles, station_x, station_x[2],
+                axial_half_length=4.5, disc_axial_half_length=2.0,
+                rotation_rad=0.0, support_mm=5.0, stock_radius_mm=stock_radius_mm,
+                width_mm=die_width_mm, corner_radius_mm=0.0,
+                target_radii_grid=target_radii_grid, upper_die_radius_mm=10.0,
+                reach_scale=1.0, closure_fraction=1.0, stroke_progress=1.0,
+            )
+            return new_grid[0][36]  # station 0, 8 mm backward of the strike; anvil pole.
+
+        self.assertAlmostEqual(backward_station_anvil_pole(2.0), 10.0, places=5)
+        wide_result = backward_station_anvil_pole(20.0)
+        self.assertLess(wide_result, 10.0)
+
+    def test_bulge_propagates_further_toward_the_free_end_than_the_clamp(self) -> None:
+        # Real open-die forging pushes displaced material toward the free
+        # (unclamped) end, not toward the clamp, which cannot move. A
+        # strike's own bulge margin must therefore reach much further
+        # forward (+X) than backward (-X) at the same distance, and must
+        # still show a meaningful nudge forward at a distance where the
+        # backward direction has already faded to nothing.
+        from lcaf.toolpathing.visualization import _apply_strike_3d
+
+        station_x = (0.0, 4.0, 8.0, 12.0, 16.0)
+        angles = tuple(2.0 * math.pi * index / 48 for index in range(48))
+        stock_radius_mm = 10.0
+        target_radii_grid = tuple(tuple(5.0 for _ in angles) for _ in station_x)
+        radii_grid = [[stock_radius_mm] * 48 for _ in station_x]
+
+        # A square (isotropic) footprint, so _footprint_bias contributes no
+        # asymmetry of its own -- any forward/backward difference here comes
+        # purely from the forward-propagation multiplier.
+        new_grid = _apply_strike_3d(
+            radii_grid, angles, station_x, station_x[2],
+            axial_half_length=2.0, disc_axial_half_length=2.0,
+            rotation_rad=0.0, support_mm=5.0, stock_radius_mm=stock_radius_mm,
+            width_mm=4.0, corner_radius_mm=0.0,
+            target_radii_grid=target_radii_grid, upper_die_radius_mm=10.0,
+            reach_scale=1.0, closure_fraction=0.5, stroke_progress=1.0,
+        )
+
+        # At equal distance (4 mm), the forward neighbour is nudged further
+        # toward target (a smaller value, since target < pristine here) than
+        # the backward neighbour.
+        self.assertLess(new_grid[3][36], new_grid[1][36])
+        # At 8 mm, the backward direction has already faded to exactly
+        # untouched, while the forward direction still shows a clear nudge.
+        self.assertAlmostEqual(new_grid[0][36], stock_radius_mm, places=5)
+        self.assertLess(new_grid[4][36], stock_radius_mm - 0.1)
 
     def test_cold_stiff_material_needs_more_cycles_to_converge_than_hot_material(self) -> None:
         # With a die too narrow for cold steel's (formability ~0.05) reduced
@@ -1136,6 +1188,91 @@ class ToolpathSlicerTests(unittest.TestCase):
         for material in MATERIALS:
             with self.subTest(material=material):
                 SliceSettings(stock_radius_mm=10, material=material).validate()
+
+    # -- Global axial volume conservation (trim allowance) ----------------
+
+    def test_axial_trim_allowance_is_exactly_zero_before_any_strike(self) -> None:
+        # Before the very first strike has moved at all, the billet is still
+        # exactly the pristine stock cylinder -- there must be no phantom
+        # "deficit" from comparing a polygon-sampled ring against the exact
+        # circle formula, or from trapezoidally integrating between station
+        # centres versus the sections' own true edge-to-edge span.
+        plan = ToolpathSlicer(
+            box_mesh(),
+            SliceSettings(
+                stock_radius_mm=10, radial_segments=4, strikes_per_segment=4,
+                max_reduction_per_strike_mm=2, die_contact_z_mm=10,
+            ),
+            self.continuous_limits,
+        ).plan()
+        self.assertEqual(axial_trim_allowance_mm(plan, 0, 0.0), 0.0)
+
+    def test_axial_trim_allowance_grows_monotonically_and_is_continuous(self) -> None:
+        # Forging never creates or destroys material: as strikes progress
+        # and reduce cross-sections the local bulge cannot fully reabsorb,
+        # the volume deficit -- and so the trim allowance -- can only grow
+        # or hold steady, never shrink, and must never jump discontinuously
+        # within an operation's own stroke or across the boundary between
+        # two operations.
+        plan = ToolpathSlicer(
+            box_mesh(),
+            SliceSettings(
+                stock_radius_mm=10, radial_segments=4, strikes_per_segment=4, cycles=2,
+                max_reduction_per_strike_mm=2, die_contact_z_mm=10,
+                material="steel", target_temperature_c=1100.0,
+            ),
+            self.continuous_limits,
+        ).plan()
+        values = [axial_trim_allowance_mm(plan, index, 1.0) for index in range(len(plan.operations))]
+        for previous, current in zip(values, values[1:]):
+            self.assertGreaterEqual(current, previous - 1e-9)
+
+        # Continuity within one operation's own stroke...
+        sample_index = len(plan.operations) // 2
+        progress_values = [axial_trim_allowance_mm(plan, sample_index, p / 20) for p in range(21)]
+        for previous, current in zip(progress_values, progress_values[1:]):
+            self.assertLess(abs(current - previous), 1.0)
+
+        # ...and across the boundary from one operation's end to the next's start.
+        for index in (0, len(plan.operations) // 2, len(plan.operations) - 2):
+            end_of_this = axial_trim_allowance_mm(plan, index, 1.0)
+            start_of_next = axial_trim_allowance_mm(plan, index + 1, 0.0)
+            self.assertAlmostEqual(end_of_this, start_of_next, places=6)
+
+    def test_axial_trim_allowance_matches_the_volume_balance_at_full_convergence(self) -> None:
+        # Once the shape has fully converged onto the target, the remaining
+        # trim allowance must equal exactly (original stock volume - target
+        # volume) / the free end's own target cross-sectional area -- the
+        # documented volume balance this function is built from, not merely
+        # "some positive number."
+        settings = SliceSettings(
+            stock_radius_mm=10, radial_segments=4, strikes_per_segment=4,
+            max_reduction_per_strike_mm=2, die_contact_z_mm=10,
+            material="steel", target_temperature_c=1100.0,
+        )
+        plan = find_sufficient_cycles(box_mesh(), settings, self.continuous_limits, max_cycles=30, tolerance_mm=0.1)
+        last_operation = len(plan.operations) - 1
+        final_trim_allowance = axial_trim_allowance_mm(plan, last_operation, 1.0)
+
+        station_x = [section.x_model_mm for section in plan.sections]
+        span_mm = station_x[-1] - station_x[0]
+        angle_count = 48
+        pristine_area_mm2 = 0.5 * angle_count * 10.0**2 * math.sin(2.0 * math.pi / angle_count)
+        original_stock_volume_mm3 = pristine_area_mm2 * span_mm
+        free_end_target_area_mm2 = plan.sections[-1].area_mm2()
+        expected = (original_stock_volume_mm3 - plan.target_volume_mm3) / free_end_target_area_mm2
+
+        self.assertAlmostEqual(final_trim_allowance, expected, places=3)
+
+    def test_axial_trim_allowance_is_zero_with_only_a_single_section(self) -> None:
+        # With radial_segments=1 there is only one station -- no adjacent
+        # pair to trapezoidally integrate a volume between -- so this must
+        # return 0 rather than raising or dividing by zero, the same
+        # convention _integrate_target_volume_mm3 already uses.
+        plan = ToolpathSlicer(
+            box_mesh(), SliceSettings(stock_radius_mm=10, radial_segments=1), self.continuous_limits
+        ).plan()
+        self.assertEqual(axial_trim_allowance_mm(plan, 0, 0.0), 0.0)
 
 
 if __name__ == "__main__":
