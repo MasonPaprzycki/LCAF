@@ -17,13 +17,19 @@ metadata, so callers must provide ``scale_mm_per_unit`` when necessary.
 
 Generated ``(x, y, z, rotation)`` coordinates follow the machine's own frame:
 
-- **X** is the billet's long axis.  Positive X points outward -- away from
-  the clamped end -- toward the free/forged end of the part.  Which end of
-  the *target mesh* is clamped is not implied by mesh geometry alone, so
-  ``SliceSettings.stock_clamped_end`` says which end (``"min"`` or ``"max"``
-  of the resolved longitudinal axis, in the mesh's own coordinates) is held,
-  and every generated X is oriented so increasing X always means "away from
-  the clamp," regardless of how the source mesh happened to be authored.
+- **X** is the billet's long axis, zero-based like the machine itself:
+  **X=0 is the clamp** -- the same physical reference LinuxCNC's own
+  homing gives machine X=0 (the negative-limit end of travel, see
+  docs/hardware_setup.md) -- and every generated X is therefore >= 0,
+  increasing outward from the clamp toward the free/forged end of the
+  part. Which end of the *target mesh* is clamped is not implied by mesh
+  geometry alone, so ``SliceSettings.stock_clamped_end`` says which end
+  (``"min"`` or ``"max"`` of the resolved longitudinal axis, in the mesh's
+  own coordinates) is held; every generated X is oriented and re-based off
+  that end, regardless of how the source mesh happened to be authored.
+  ``SliceSettings.x_offset_mm`` still adds on top of this if the clamp
+  itself sits some fixed distance away from machine X=0 rather than
+  exactly at it.
 - **Y** is the radial axis orthogonal to X that the fixed lower die (anvil)
   lies along.
 - **Z** is the radial axis orthogonal to both X and Y that the upper
@@ -48,6 +54,8 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
+
+from .material import MATERIALS
 
 
 Point3 = tuple[float, float, float]
@@ -105,12 +113,18 @@ class TriangleMesh:
 
 @dataclass(frozen=True)
 class MachineLimits:
-    """Machine-coordinate limits used to reject unsafe generated operations."""
+    """Machine-coordinate limits used to reject unsafe generated operations.
 
-    x_min_mm: float = -50.0
-    x_max_mm: float = 50.0
-    y_min_mm: float = -50.0
-    y_max_mm: float = 50.0
+    Zero-based on every axis, matching the machine's own [0, max_travel]
+    convention (see docs/hardware_setup.md) -- these defaults are only a
+    fallback for when configs/axis.jsonl can't be read (see
+    from_lcaf_config()); real limits should always come from there.
+    """
+
+    x_min_mm: float = 0.0
+    x_max_mm: float = 100.0
+    y_min_mm: float = 0.0
+    y_max_mm: float = 100.0
     z_retracted_mm: float = 0.0
     z_extended_mm: float = 100.0
 
@@ -118,10 +132,22 @@ class MachineLimits:
     def from_lcaf_config(cls, filename: str | Path) -> "MachineLimits":
         """Read machine X/Y/Z travel limits from ``configs/axis.jsonl``.
 
-        These are the same soft_min_mm/soft_max_mm each JointConfiguration
-        carries for LinuxCNC's own INI generation (see
-        lcaf.utils.joint_configuration) -- there is a single on-disk source
-        for machine travel limits, not a separate copy for the slicer.
+        These are the same max_travel each JointConfiguration carries for
+        LinuxCNC's own INI generation (see lcaf.utils.joint_configuration)
+        -- there is a single on-disk source for machine travel limits, not a
+        separate copy for the slicer. JointConfiguration stores this in
+        inches (configs/machine.json declares LINEAR_UNITS=inch for LinuxCNC
+        itself) measured from a fixed zero (every switched joint's travel is
+        [0, max_travel], see the max_travel docstring), while this planner's
+        whole coordinate space is millimetres (see module docstring), so
+        max_travel is scaled by 25.4 on the way in and the minimum is always
+        0.0.
+
+        This lines up with the planner's own X convention: X=0 is the clamp
+        (see module docstring), the same physical point homing gives machine
+        X=0, so every generated X is already >= 0 by construction -- there
+        is no separate reconciliation needed between the planner's frame and
+        this zero-based machine range.
 
         The rotary (A) axis is continuous on this machine (see
         JointConfiguration.has_limit_switches) and is not limited here; only
@@ -143,12 +169,12 @@ class MachineLimits:
             x, y, z = by_axis["X"], by_axis["Y"], by_axis["Z"]
 
             return cls(
-                x_min_mm=float(x.soft_min_mm),
-                x_max_mm=float(x.soft_max_mm),
-                y_min_mm=float(y.soft_min_mm),
-                y_max_mm=float(y.soft_max_mm),
-                z_retracted_mm=float(z.soft_min_mm),
-                z_extended_mm=float(z.soft_max_mm),
+                x_min_mm=0.0,
+                x_max_mm=float(x.max_travel) * 25.4,
+                y_min_mm=0.0,
+                y_max_mm=float(y.max_travel) * 25.4,
+                z_retracted_mm=0.0,
+                z_extended_mm=float(z.max_travel) * 25.4,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ToolpathPlanningError(
@@ -212,6 +238,18 @@ class SliceSettings:
     the strike coordinates themselves: the target's final geometry is
     unaffected by them.
 
+    ``material`` (one of ``lcaf.toolpathing.material.MATERIALS`` --
+    currently ``"plasticine"``, ``"aluminum"``, ``"steel"``) together with
+    ``target_temperature_c`` now also drives the *preview's* deformation
+    mechanics: see ``lcaf.toolpathing.material.formability_response`` and
+    ``visualization._apply_strike_3d``. Neither setting changes the planned
+    strike coordinates (x/y/die_gap/rotation) themselves -- only how the
+    intermediate/bulge preview looks and how many strikes/cycles it takes to
+    fully converge. A separate, independent slab-method force estimate
+    (``lcaf.toolpathing.material.estimate_operation_force_kn``) also reads
+    ``material``/``target_temperature_c``, purely for reporting -- it never
+    feeds back into the deformation preview or the planned coordinates.
+
     ``stock_clamped_end`` says which end of the target mesh, along its
     resolved longitudinal axis, is held in the clamp: ``"min"`` for the
     mesh's lower bound on that axis, ``"max"`` for its upper bound.  Every
@@ -229,6 +267,7 @@ class SliceSettings:
     x_offset_mm: float = 0.0
     y_position_mm: float = 0.0
     target_temperature_c: float = 0.0
+    material: str = "steel"
     scale_mm_per_unit: float = 1.0
     longitudinal_axis: str = "auto"
     die_width_mm: float | None = None
@@ -271,6 +310,10 @@ class SliceSettings:
             )
         if self.scale_mm_per_unit <= 0:
             raise ToolpathPlanningError("scale_mm_per_unit must be positive.")
+        if self.material.strip().lower() not in MATERIALS:
+            raise ToolpathPlanningError(
+                f"Unknown material '{self.material}'. Choose one of: {', '.join(MATERIALS)}."
+            )
         # die_width_mm/upper_die_radius_mm are always concrete by this point
         # -- __post_init__ already resolved any None to a default -- so an
         # explicitly-passed non-positive value is the only way these can
@@ -485,6 +528,13 @@ class ToolpathSlicer:
         # Machine +X always means "away from the clamp." The mesh's own
         # local axis may point either way, so this flips it when needed.
         self._x_sign = 1.0 if settings.stock_clamped_end.lower() == "min" else -1.0
+        # Machine X=0 is the clamp, not the mesh's own centre -- see the
+        # module docstring. The clamp is whichever bound of the mesh's
+        # longitudinal extent stock_clamped_end names; every generated X is
+        # measured from that bound, not from _origin (which the two radial
+        # axes still use to centre Y/Z, unrelated to this).
+        lower, upper = self.mesh.bounds()
+        self._x_reference = lower[self._axis] if settings.stock_clamped_end.lower() == "min" else upper[self._axis]
 
     def plan(self) -> ToolpathPlan:
         strike_rotations = self._strike_rotations()
@@ -597,6 +647,7 @@ class ToolpathSlicer:
                                     "upper_die_radius_mm": _round_machine_value(
                                         self.settings.upper_die_radius_mm
                                     ),
+                                    "material": self.settings.material.strip().lower(),
                                 },
                             }
                         )
@@ -713,11 +764,11 @@ class ToolpathSlicer:
         if len(hull) < 3:
             raise ToolpathPlanningError(
                 "Could not form a closed cross-section at "
-                f"{model_position - self._origin[self._axis]:.3f} mm. "
+                f"X={self._x_sign * (model_position - self._x_reference):.3f} mm. "
                 "Use a watertight triangle mesh and a valid longitudinal axis."
             )
 
-        x_model_mm = self._x_sign * (model_position - self._origin[self._axis])
+        x_model_mm = self._x_sign * (model_position - self._x_reference)
         return Segment(
             x_start_mm=x_model_mm,
             x_end_mm=x_model_mm,

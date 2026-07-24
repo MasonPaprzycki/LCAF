@@ -15,6 +15,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Sequence
 
+from .material import MATERIALS, plan_force_report
 from .toolpath_slicer import (
     MachineLimits,
     SliceSettings,
@@ -27,10 +28,21 @@ from .visualization import (
     anvil_side_support,
     die_contact_profile,
     disc_contact_profile,
+    disc_rim_profile,
     find_sufficient_cycles,
     material_state,
     radial_resample,
 )
+
+
+# Presentation-only hints for the material picker -- not used by any
+# mechanics, purely to help a user pick a realistic target_temperature_c for
+# lcaf.toolpathing.material's own bands.
+_MATERIAL_TEMPERATURE_HINTS = {
+    "plasticine": "Typically worked near room temperature, ~15-30 C.",
+    "aluminum": "Commonly hot-forged around 400-500 C.",
+    "steel": "Commonly hot-forged around 900-1250 C.",
+}
 
 
 class ForgePreview(ttk.Frame):
@@ -708,7 +720,7 @@ class Forge3DPreview(ttk.Frame):
         self,
         project,
         section_x: float,
-        radius_mm: float,
+        rim: Sequence[tuple[float, float]],
         depth_mm: float,
         thickness_mm: float,
         normal_y: float,
@@ -717,16 +729,17 @@ class Forge3DPreview(ttk.Frame):
         tangent_z: float,
         color: str,
         stipple: str = "",
-        sides: int = 24,
     ) -> None:
-        """Render a flat-faced circular disc (a puck): a front face at
-        ``depth_mm``, a back face ``thickness_mm`` further along the same
-        normal direction, and a rim connecting them -- so the striking die
-        always reads as an actual circle, not a rectangular block or an
-        elliptical smear. Callers that need to keep the disc from visually
-        overshooting the one segment it strikes should shrink ``radius_mm``
-        itself (uniformly, so it stays a true circle) rather than squashing
-        it along one axis.
+        """Render a flat-faced puck: a front face at ``depth_mm``, a back
+        face ``thickness_mm`` further along the same normal direction, and a
+        rim connecting them, tracing the ``(axial_offset, tangential_offset)``
+        perimeter points in ``rim``.
+
+        The caller passes the die's real, full-size footprint here (see
+        :func:`lcaf.toolpathing.visualization.disc_rim_profile`) -- the
+        rendered tool is always the true, physical shape of the die, never
+        flattened or shrunk to reflect how far this one strike's rigid
+        contact mechanics happen to trust it for.
         """
 
         def vertex(x_offset: float, tangential_offset: float, depth: float) -> tuple[float, float, float]:
@@ -740,20 +753,13 @@ class Forge3DPreview(ttk.Frame):
             coordinates = [value for point in points for value in project(*point)]
             self.canvas.create_polygon(*coordinates, fill=color, outline="#fff0a3", width=1, stipple=stipple)
 
-        sides = max(8, sides)
-        rim = [
-            (
-                radius_mm * math.sin(2.0 * math.pi * index / sides),
-                radius_mm * math.cos(2.0 * math.pi * index / sides),
-            )
-            for index in range(sides)
-        ]
         back_depth = depth_mm + thickness_mm
 
         fill_polygon([vertex(x_offset, tangential_offset, depth_mm) for x_offset, tangential_offset in rim])
         fill_polygon(
             [vertex(x_offset, tangential_offset, back_depth) for x_offset, tangential_offset in reversed(rim)]
         )
+        sides = len(rim)
         for index in range(sides):
             next_index = (index + 1) % sides
             x0, t0 = rim[index]
@@ -831,26 +837,125 @@ class Forge3DPreview(ttk.Frame):
 
         anvil_support = self._stroke_start_anvil_support()
         plate_thickness = max(self.stock_radius * 0.35, 1.0)
-        # The disc is always drawn as a true circle -- never squashed into
-        # an ellipse. Its radius is still capped to the segment this strike
-        # targets (not an arbitrary "generously large for legibility" size
-        # disconnected from where the strike can actually affect the
-        # billet): when the die's own radius is wider than its segment, the
-        # whole circle shrinks uniformly to the segment's own half-width
-        # instead of visually overshooting into neighbouring segments the
-        # engine never lets it touch.
-        segment_x_start = metadata.get("segment_x_start_mm")
-        segment_x_end = metadata.get("segment_x_end_mm")
-        if segment_x_start is not None and segment_x_end is not None:
-            segment_half_width = abs(float(segment_x_end) - float(segment_x_start)) / 2.0
-        else:
-            segment_half_width = max(self.stock_radius * 0.3, 0.75)
-        disc_radius = max(0.1, min(upper_die_radius, segment_half_width))
+        # The upper die is a real, physical circular disc: it always renders
+        # as its full true circle at upper_die_radius_mm, never flattened or
+        # shrunk. The contact *mechanics* still confine this strike's own
+        # rigid effect to the one segment it targets (see
+        # visualization._apply_strike_3d's disc_axial_half_length) -- that is
+        # a computational-geometry modelling choice about how far this one
+        # strike's commanded depth is trusted to apply, not a claim that the
+        # tool itself is somehow physically smaller or clipped, so the
+        # rendered tool is decoupled from it and always shown at full size.
+        rim = disc_rim_profile(upper_die_radius, upper_die_radius, sides=24)
         self._draw_solid_disc(
-            project, section.x_model_mm, disc_radius,
+            project, section.x_model_mm, rim,
             -anvil_support, -plate_thickness, normal_y, normal_z, tangent_y, tangent_z,
             self.upper_die, stipple="gray50",
         )
+
+
+class ForceReadout(ttk.Frame):
+    """A read-only tab reporting the separate, independent forging-force estimate.
+
+    This never feeds the deformation preview or the plan above it -- it is a
+    standalone slab-method calculation (see ``lcaf.toolpathing.material``)
+    from the same material/temperature/die geometry, computed purely for
+    process-planning information, assuming rigid, indestructible dies able
+    to supply whatever force it reports.
+    """
+
+    background = "#101827"
+    grid = "#26344a"
+    text = "#d9e2f2"
+    line = "#ffb454"
+    marker = "#4fc3a1"
+
+    def __init__(self, master: tk.Widget) -> None:
+        super().__init__(master, padding=10)
+        self.report: tuple[dict, ...] = ()
+        self.current_index = 0
+
+        header = ttk.Label(
+            self,
+            text=(
+                "Estimated forging force per strike -- a separate slab-method (friction-hill) "
+                "hand-calculation from the chosen material/temperature and die contact geometry, "
+                "not a simulation. It never affects the deformation preview or the planned "
+                "coordinates above: dies are treated as rigid and able to supply whatever force "
+                "is shown here."
+            ),
+            foreground="#9fb0c9",
+            wraplength=1000,
+        )
+        header.pack(fill="x", pady=(0, 8))
+
+        summary = ttk.Frame(self)
+        summary.pack(fill="x", pady=(0, 8))
+        self.current_force_text = tk.StringVar(value="Current step: —")
+        self.peak_force_text = tk.StringVar(value="Peak across plan: —")
+        ttk.Label(summary, textvariable=self.current_force_text, font=("Segoe UI", 12, "bold")).pack(side="left")
+        ttk.Label(summary, textvariable=self.peak_force_text, foreground="#9fb0c9").pack(side="left", padx=(24, 0))
+
+        self.canvas = tk.Canvas(self, bg=self.background, highlightthickness=0, height=220)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda _event: self._redraw())
+
+    def show_plan(self, plan: ToolpathPlan, _settings: SliceSettings) -> None:
+        self.report = plan_force_report(plan.operations) if plan.operations else ()
+        self.current_index = 0
+        peak = max((row["estimated_force_kn"] for row in self.report), default=0.0)
+        self.peak_force_text.set(f"Peak across plan: {peak:.1f} kN")
+        self._redraw()
+
+    def show_operation(self, operation_index: int, _progress: float) -> None:
+        if not self.report:
+            self.current_force_text.set("Current step: —")
+            return
+        self.current_index = max(0, min(operation_index, len(self.report) - 1))
+        row = self.report[self.current_index]
+        self.current_force_text.set(
+            f"Current step: {row['estimated_force_kn']:.1f} kN "
+            f"({row['material']} at {row['target_temperature_c']:.0f} C)"
+        )
+        self._redraw()
+
+    def _redraw(self) -> None:
+        canvas = self.canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 1)
+        height = max(canvas.winfo_height(), 1)
+        if not self.report:
+            canvas.create_text(
+                width / 2, height / 2, text="Generate a preview to see the force estimate.",
+                fill=self.text, font=("Segoe UI", 10),
+            )
+            return
+
+        margin = 30
+        plot_width = max(width - 2 * margin, 1)
+        plot_height = max(height - 2 * margin, 1)
+        forces = [row["estimated_force_kn"] for row in self.report]
+        peak = max(forces) if max(forces) > 0 else 1.0
+        count = len(forces)
+
+        for fraction in (0.0, 0.5, 1.0):
+            y = margin + plot_height * (1.0 - fraction)
+            canvas.create_line(margin, y, margin + plot_width, y, fill=self.grid)
+            canvas.create_text(
+                margin - 4, y, text=f"{peak * fraction:.0f} kN", fill=self.text, anchor="e", font=("Segoe UI", 8),
+            )
+
+        def point(index: int, force: float) -> tuple[float, float]:
+            x = margin + (plot_width * index / (count - 1) if count > 1 else 0.0)
+            y = margin + plot_height * (1.0 - force / peak)
+            return x, y
+
+        coordinates = [coordinate for index, force in enumerate(forces) for coordinate in point(index, force)]
+        if count > 1:
+            canvas.create_line(*coordinates, fill=self.line, width=2)
+        marker_x, marker_y = point(self.current_index, forces[self.current_index])
+        canvas.create_oval(marker_x - 4, marker_y - 4, marker_x + 4, marker_y + 4, fill=self.marker, outline="")
+        canvas.create_line(marker_x, margin, marker_x, margin + plot_height, fill=self.marker, dash=(3, 3))
 
 
 class ToolpathApp(tk.Tk):
@@ -890,6 +995,7 @@ class ToolpathApp(tk.Tk):
         self.axis = tk.StringVar(value="auto")
         self.clamped_end = tk.StringVar(value="min")
         self.temperature = tk.StringVar(value="0")
+        self.material = tk.StringVar(value="steel")
         self.die_shape = tk.StringVar(value=self.DIE_SHAPE_RECTANGULAR)
         self.die_length = tk.StringVar(value="")
         self.die_width = tk.StringVar(value="")
@@ -1026,7 +1132,7 @@ class ToolpathApp(tk.Tk):
             ("Die contact Z", self.die_contact_z),
             ("Model scale", self.scale),
             ("Target temperature (°C)", self.temperature),
-            ("X centre offset", self.x_offset),
+            ("X offset from clamp (mm)", self.x_offset),
             ("Y tool position", self.y_position),
             ("Cycles", self.cycles),
         )
@@ -1062,12 +1168,40 @@ class ToolpathApp(tk.Tk):
             state="readonly",
             width=15,
         ).pack(fill="x")
+        material_field = ttk.Frame(parameters)
+        material_field.grid(row=5, column=2, sticky="ew", padx=6, pady=4)
+        ttk.Label(material_field, text="Billet material").pack(anchor="w")
+        self.material_picker = ttk.Combobox(
+            material_field,
+            textvariable=self.material,
+            values=MATERIALS,
+            state="readonly",
+            width=15,
+        )
+        self.material_picker.pack(fill="x")
+        self.material_picker.bind("<<ComboboxSelected>>", self._on_material_changed)
+        self.material_info = tk.StringVar(value="")
+        self._on_material_changed()
+        ttk.Label(
+            parameters,
+            text=(
+                "Material and target temperature together drive how convincingly the preview's "
+                "deformation bulges/settles (cold, stiff material spreads less and needs more "
+                "strikes/cycles to fully converge) and the separate force estimate on its own "
+                "tab -- never the planned strike coordinates themselves."
+            ),
+            foreground="#9fb0c9",
+            wraplength=1040,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 4))
+        ttk.Label(
+            parameters, textvariable=self.material_info, foreground="#9fb0c9",
+        ).grid(row=6, column=2, sticky="w", padx=6, pady=(2, 4))
         ttk.Label(
             parameters,
             textvariable=self.stock_length_info,
             foreground="#9fb0c9",
             wraplength=700,
-        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=6, pady=4)
+        ).grid(row=7, column=0, columnspan=3, sticky="w", padx=6, pady=4)
 
         die_box = ttk.LabelFrame(
             shell, text="3. Die geometry (lower die: rectangle · upper die: circular disc)", padding=10
@@ -1190,6 +1324,8 @@ class ToolpathApp(tk.Tk):
         self.view_notebook.add(self.preview, text="2D cross-section + axial plan")
         self.preview_3d = Forge3DPreview(self.view_notebook)
         self.view_notebook.add(self.preview_3d, text="3D view (rotate / roll / pan)")
+        self.force_readout = ForceReadout(self.view_notebook)
+        self.view_notebook.add(self.force_readout, text="Force estimate")
         self.view_notebook.bind("<<NotebookTabChanged>>", self._on_view_tab_changed)
 
         note = ttk.Label(
@@ -1235,6 +1371,9 @@ class ToolpathApp(tk.Tk):
         self.axis.set("x")
         self.status.set("Example loaded. Generate a preview, then use Play to watch the die-envelope animation.")
 
+    def _on_material_changed(self, _event: tk.Event | None = None) -> None:
+        self.material_info.set(_MATERIAL_TEMPERATURE_HINTS.get(self.material.get(), ""))
+
     def _on_die_shape_changed(self, _event: tk.Event | None = None) -> None:
         radiused = self.die_shape.get() == self.DIE_SHAPE_RADIUSED
         self.die_radius_entry.configure(state="normal" if radiused else "disabled")
@@ -1276,6 +1415,7 @@ class ToolpathApp(tk.Tk):
                 x_offset_mm=float(self.x_offset.get()),
                 y_position_mm=float(self.y_position.get()),
                 target_temperature_c=float(self.temperature.get()),
+                material=self.material.get(),
                 scale_mm_per_unit=float(self.scale.get()),
                 longitudinal_axis=self.axis.get(),
                 stock_clamped_end=self.clamped_end.get(),
@@ -1313,6 +1453,7 @@ class ToolpathApp(tk.Tk):
 
         self.preview.show_plan(self.plan, self.settings)
         self.preview_3d.show_plan(self.plan, self.settings)
+        self.force_readout.show_plan(self.plan, self.settings)
         self.operation_index = 0
         self.operation_progress = 0.0
         self._set_playback_operation(0, 0.0)
@@ -1340,6 +1481,7 @@ class ToolpathApp(tk.Tk):
         self.operation_index = max(0, min(index, len(self.plan.operations) - 1))
         self.operation_progress = max(0.0, min(progress, 1.0))
         self.preview.show_operation(self.operation_index, self.operation_progress)
+        self.force_readout.show_operation(self.operation_index, self.operation_progress)
         self._on_view_tab_changed()
         operation = self.plan.operations[self.operation_index]
         metadata = operation["metadata"]
@@ -1407,10 +1549,13 @@ class ToolpathApp(tk.Tk):
             self._generate()
         if self.plan is None:
             return
+        default_dir = Path(__file__).resolve().parents[3] / "toolpaths"
+        default_dir.mkdir(parents=True, exist_ok=True)
         filename = filedialog.asksaveasfilename(
             title="Export ForgeBrain JSONL",
             defaultextension=".jsonl",
             filetypes=(("JSON Lines", "*.jsonl"), ("All files", "*.*")),
+            initialdir=str(default_dir),
         )
         if not filename:
             return

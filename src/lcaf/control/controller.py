@@ -7,10 +7,10 @@ from lcaf.control.forge_brain import ForgeBrain
 
 class Controller:
 
-    def __init__(self):
+    def __init__(self, simulate: bool = False):
 
         self.telemetry = Telemetry()
-        self.motion = MotionCoordinator()
+        self.motion = MotionCoordinator(simulate=simulate)
         self.planner = AdaptivePlanner()
 
         self.brain = ForgeBrain(motion=self.motion, planner=self.planner)
@@ -53,7 +53,7 @@ class Controller:
 
             timestamp=time.time(),
 
-            motion_enabled = self.motion.is_motion_enabled(),
+            machine_enabled = self.motion.is_motion_enabled(),
 
             machine_homed = self.motion.all_homed(),
 

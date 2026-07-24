@@ -9,10 +9,38 @@ from pathlib import Path
 class JointConfiguration:
     """
     Describes one physical CNC joint driven by a single stepper motor.
-    A joint contains a motor and two limit switches.
 
-    This object contains the hardware description of one axis. It is used by
-    the LinuxCNC HAL/INI generator and by LinuxCNCAxialInterface.
+    A "joint" here is a LinuxCNC concept: one stepper-driven degree of
+    freedom, numbered 0-3 (`joint`), that also has a Cartesian letter
+    (`axis`, X/Y/Z/A). Each joint owns exactly one Mesa stepgen instance
+    (`mesa_stepgen`) and, optionally, one enable output and a pair of limit
+    inputs. See docs/hardware_setup.md section 2 ("What is a joint?") for
+    the full joint <-> stepgen <-> terminal-block mapping.
+
+    This object is the hardware description of one joint. It is used by
+    the LinuxCNC HAL/INI generator (generate_hal/generate_ini below) and by
+    LinuxCNCAxialInterface (lcaf.control.linuxcnc_interface) at runtime.
+
+    Units: every distance/speed/acceleration field on this class is in the
+    joint's *own* native unit -- inches (and inches/s, inches/s^2) for a
+    linear joint (is_angular=False), degrees (deg/s, deg/s^2) for the
+    angular joint (is_angular=True). There is deliberately no "_mm"/"_in"
+    suffix on these fields: the same field means a different unit depending
+    on is_angular, so a fixed suffix would be wrong for one case or the
+    other. docs/hardware_setup.md has a units table spelling this out
+    per-field if you're ever unsure.
+
+    A switched joint's (has_limit_switches=True; X/Y/Z here) usable range is
+    always [0, max_travel] in its native unit -- 0 is wherever
+    LinuxCNCAxialInterface.start_homing()/poll_homing() finds the negative
+    limit switch at homing time, regardless of the physical machine's
+    absolute position.
+    The switchless angular joint (has_limit_switches=False, is_angular=True;
+    A here) instead has range [-max_travel, max_travel]: 0 is simply
+    wherever it happened to be sitting at power-on, since it has no
+    reference switch to seek, and it is free to rotate either direction
+    from there since this project's A joint has no cable-wrap constraint.
+    See docs/hardware_setup.md.
 
     Target platform:
         Raspberry Pi host running LinuxCNC
@@ -25,74 +53,135 @@ class JointConfiguration:
 
     # Identity
     joint: int
+    """LinuxCNC joint number (0-3 in this project). Selects the stepgen
+    instance and every generated joint.N.* HAL pin."""
+
     axis: str
+    """Cartesian letter this joint is bound to (X/Y/Z/A). trivkins maps
+    this 1:1 to the joint number -- there is no shared kinematics here."""
 
     # Stepper Motor
     motor_steps_per_revolution: int
+    """Full steps per motor shaft revolution (e.g. 200 for a 1.8 degree/step motor)."""
+
     microsteps: int
-    leadscrew_pitch_mm: float
+    """Microstep multiplier set on the external stepper driver (e.g. 8)."""
+
+    travel_per_motor_rev: float
     """
-    Linear joints: leadscrew travel (mm) per motor revolution.
-    Angular joints (is_angular=True): degrees of travel per motor revolution.
+    How far the joint moves for one full motor revolution, in the joint's
+    native unit: inches/rev for a linear joint (e.g. a leadscrew's pitch),
+    degrees/rev for the angular joint (e.g. a belt/gearbox reduction ratio
+    expressed as output-degrees per motor turn). Used with
+    motor_steps_per_revolution and microsteps to derive steps_per_unit.
     """
 
-    max_velocity_mm_s: float
-    max_acceleration_mm_s2: float
+    max_velocity: float
+    max_acceleration: float
     """
-    Angular joints: interpreted as deg/s and deg/s^2 respectively.
+    Linear joint: inches/s and inches/s^2.
+    Angular joint: deg/s and deg/s^2.
     """
 
     # Mesa HAL Pins
     mesa_stepgen: str
     """
-    Example:
-        hm2_7i96s.0.stepgen.00
+    The Mesa stepgen instance driving this joint, e.g.:
+        hm2_7i76e.0.stepgen.00
     """
 
     enable_output: str | None = None
+    """Field output pin wired to the driver's enable input, e.g.
+    hm2_7i76e.0.7i76.0.0.output-00. None if this joint's driver is always
+    enabled (not recommended -- see docs/hardware_setup.md)."""
+
     negative_limit_input: str | None = None
-    """Physical Mesa field-input pin wired to the negative limit switch, e.g. hm2_7i76e.0.7i76.0.0.input-00"""
+    """Physical Mesa field-input pin wired to the negative (zero-end) limit
+    switch, e.g. hm2_7i76e.0.7i76.0.0.input-00. None if has_limit_switches
+    is False. When MachineConfiguration.use_linuxcnc_native_processes is
+    True, this same signal also doubles as LinuxCNC's native home switch
+    (joint.N.home-sw-in) -- see generate_hal()."""
+
     positive_limit_input: str | None = None
-    """Physical Mesa field-input pin wired to the positive limit switch, e.g. hm2_7i76e.0.7i76.0.0.input-01"""
+    """Physical Mesa field-input pin wired to the positive (max-travel-end)
+    limit switch, e.g. hm2_7i76e.0.7i76.0.0.input-01. None if
+    has_limit_switches is False."""
 
     # Joint kinematics
     is_angular: bool = False
+    """True for the rotary joint (INI TYPE = ANGULAR, values interpreted in
+    degrees). False for a linear joint (INI TYPE = LINEAR, values in inches)."""
 
     has_limit_switches: bool = True
     """
     False for a joint with no physical limit switches (e.g. a continuously
-    rotating axis): homing zeroes the joint at its current position instead
-    of jogging to find switches, and soft_min_mm/soft_max_mm are used as-is
-    rather than being measured. See LinuxCNCAxialInterface.home_axis.
+    rotating axis): start_homing() zeroes the joint at its current position
+    instead of seeking a switch, and max_travel is trusted as configured
+    rather than being measured. For an angular joint this also switches
+    max_travel's meaning from a one-directional cap to a symmetric +/-
+    bound (see max_travel below) -- a switchless rotary joint has no
+    physical reason to be direction-limited the way a switched linear one
+    is. See LinuxCNCAxialInterface.start_homing/poll_homing.
     """
 
-    # Signal polarity
-    invert_step: bool = False
-    invert_direction: bool = False
-    invert_enable: bool = False
+    # Signal polarity. `inverted` is the one supported software fix for a
+    # wiring/motor mismatch: it flips the stepgen's position-scale sign in
+    # HAL, which reverses that joint's motion direction end-to-end without
+    # re-wiring anything. This is the normal fix for a reversed motor/lead
+    # direction. Z in this project's axis.jsonl has this set (see
+    # docs/hardware_setup.md). A step-signal or enable-signal polarity
+    # mismatch is a physical-layer problem the 7I76E has no HAL invert pin
+    # for -- that's fixed by swapping wires at the terminal block, not a
+    # config flag (see docs/hardware_setup.md).
+    inverted: bool = False
 
     invert_negative_limit: bool = False
     invert_positive_limit: bool = False
-    invert_home_switch: bool = False
+    """
+    Set if a limit switch reads "active" when open and "inactive" when
+    closed (backwards from the normally-closed wiring this project assumes
+    -- see docs/hardware_setup.md "Limit switch wiring"). Reads the field
+    input component's inverted "-not" sibling pin instead of the raw one.
+    Fully supported in HAL (see generate_hal()).
+    """
 
-    # Software travel limits
-    soft_min_mm: float | None = None
-    soft_max_mm: float | None = None
-
-    # Homing (LinuxCNC-native homing is disabled by default; this project
-    # homes axes in software by jogging to the limit switches, see
-    # LinuxCNCAxialInterface.home_axis)
-    home_offset_mm: float = 0.0
+    # Native-homing sequencing. Only meaningful when
+    # MachineConfiguration.use_linuxcnc_native_processes is True, in which
+    # case generate_ini() uses this joint's own number (0-3) as its
+    # HOME_SEQUENCE when this is left at -1, so "Home All" homes joints one
+    # at a time in joint-number order. Set explicitly only to home two
+    # joints simultaneously (matching LinuxCNC's HOME_SEQUENCE semantics).
+    # Inert when use_linuxcnc_native_processes is False.
     home_sequence: int = -1
 
-    # Step timing (nanoseconds)
+    # Software travel limit. In its own native unit (inches for linear,
+    # degrees for angular):
+    #   - A switched linear joint (X/Y/Z) always has range [0, max_travel]:
+    #     0 is wherever homing finds the negative limit switch (measured in
+    #     software mode, or wherever LinuxCNC's own native homing lands in
+    #     native mode -- see LinuxCNCAxialInterface.start_homing/poll_homing), and
+    #     max_travel is the static envelope LinuxCNC's INI soft limits use.
+    #   - The switchless angular joint (A) has range [-max_travel,
+    #     max_travel]: 0 is simply wherever it was sitting when it powered
+    #     on (there is no reference switch to seek), and since this project
+    #     has no cable-wrap constraint on A, it is free to rotate either
+    #     direction from there -- max_travel is the symmetric soft-limit
+    #     magnitude in each direction, not a one-directional cap.
+    max_travel: float | None = None
+    """Total usable travel, in inches (linear) or degrees (angular).
+    Required when has_limit_switches is False (nothing else could supply
+    it); required by generate_ini() for every joint regardless, since it
+    always becomes the INI's MAX_LIMIT (and, for a switchless angular
+    joint, -max_travel becomes MIN_LIMIT too -- see above)."""
+
+    # Step timing (nanoseconds) -- signal-level, not a "freedom units" concern.
     step_length_ns: int = 5000
     step_space_ns: int = 5000
     direction_setup_ns: int = 20000
     direction_hold_ns: int = 20000
 
-    # Derived values
-    steps_per_mm: float = field(init=False)
+    # Derived: steps per inch (linear joints) or steps per degree (angular).
+    steps_per_unit: float = field(init=False)
 
     def __post_init__(self):
 
@@ -109,25 +198,31 @@ class JointConfiguration:
         if self.microsteps <= 0:
             raise ValueError("microsteps must be positive.")
 
-        if self.leadscrew_pitch_mm <= 0:
-            raise ValueError("leadscrew_pitch_mm must be positive.")
+        if self.travel_per_motor_rev <= 0:
+            raise ValueError("travel_per_motor_rev must be positive.")
 
-        if self.max_velocity_mm_s <= 0:
-            raise ValueError("max_velocity_mm_s must be positive.")
+        if self.max_velocity <= 0:
+            raise ValueError("max_velocity must be positive.")
 
-        if self.max_acceleration_mm_s2 <= 0:
-            raise ValueError("max_acceleration_mm_s2 must be positive.")
+        if self.max_acceleration <= 0:
+            raise ValueError("max_acceleration must be positive.")
 
-        if not self.has_limit_switches and (self.soft_min_mm is None or self.soft_max_mm is None):
+        if not self.has_limit_switches and self.max_travel is None:
             raise ValueError(
                 f"Joint {self.joint} ({self.axis}) has has_limit_switches=False, so its "
-                "travel range cannot be measured; soft_min_mm/soft_max_mm are required."
+                "travel range cannot be measured; max_travel is required."
             )
 
-        self.steps_per_mm = (
+        if self.max_travel is not None and self.max_travel <= 0:
+            raise ValueError(
+                f"Joint {self.joint} ({self.axis}): max_travel must be positive "
+                "(travel always starts at 0 -- see the max_travel docstring)."
+            )
+
+        self.steps_per_unit = (
             self.motor_steps_per_revolution
             * self.microsteps
-            / self.leadscrew_pitch_mm
+            / self.travel_per_motor_rev
         )
 
     @property
@@ -158,6 +253,27 @@ class JointConfiguration:
     def ini_axis_section(self) -> str:
         return f"AXIS_{self.axis}"
 
+    @property
+    def unit_label(self) -> str:
+        """Human-readable unit label for this joint's distance fields, for
+        logging/telemetry/docs -- "deg" for the angular joint, "in" otherwise."""
+        return "deg" if self.is_angular else "in"
+
+    @property
+    def symmetric_travel(self) -> bool:
+        """True when this joint's usable range is [-max_travel, max_travel]
+        rather than [0, max_travel] -- the switchless angular joint (A)
+        only, since it has no reference switch and no cable-wrap
+        constraint. See the max_travel docstring."""
+        return self.is_angular and not self.has_limit_switches
+
+    @property
+    def min_travel(self) -> float:
+        """The INI MIN_LIMIT for this joint: -max_travel for a switchless
+        angular joint (symmetric_travel), 0.0 otherwise."""
+        assert self.max_travel is not None
+        return -self.max_travel if self.symmetric_travel else 0.0
+
     @classmethod
     def from_dict(cls, data: dict) -> "JointConfiguration":
         known = {f for f in cls.__dataclass_fields__ if cls.__dataclass_fields__[f].init}
@@ -178,16 +294,24 @@ class MachineConfiguration:
     Machine-wide settings needed to render a complete LinuxCNC .hal/.ini pair.
     Combined with the JointConfiguration list, this is the single source of
     truth the generator and the runtime interface both read from.
+
+    Unlike JointConfiguration's fields, every field here is unambiguously
+    one unit or the other (there's a separate default_linear_*/
+    default_angular_* pair for each), so field names carry their unit
+    suffix directly: "_in_s" (inches/second), "_in_s2" (inches/second^2),
+    "_deg_s", "_deg_s2", "_ns" (nanoseconds).
     """
 
     machine_name: str
 
-    linear_units: str = "mm"
+    linear_units: str = "inch"
+    """LinuxCNC [TRAJ]LINEAR_UNITS. This machine is configured entirely in
+    inches -- see docs/hardware_setup.md "Units" section."""
     angular_units: str = "degree"
 
-    default_linear_velocity_mm_s: float = 10.0
-    max_linear_velocity_mm_s: float = 25.0
-    max_linear_acceleration_mm_s2: float = 400.0
+    default_linear_velocity_in_s: float = 0.393701
+    max_linear_velocity_in_s: float = 0.984252
+    max_linear_acceleration_in_s2: float = 15.748031
 
     default_angular_velocity_deg_s: float = 10.0
     max_angular_velocity_deg_s: float = 45.0
@@ -207,6 +331,48 @@ class MachineConfiguration:
     """
 
     watchdog_timeout_ns: int = 5_000_000
+
+    use_linuxcnc_native_processes: bool = False
+    """
+    Chooses which of two entirely different homing/motion-permission
+    strategies LinuxCNC runs under, machine-wide (this is not a per-joint
+    setting -- every joint homes the same way):
+
+    False (default): homing is done in Python by LinuxCNCAxialInterface --
+    jogging each switched joint to its limit switches directly, or zeroing
+    a switchless joint immediately (see JointConfiguration.has_limit_switches).
+    LinuxCNC's own [JOINT_n]HOME_SEQUENCE is left at -1 (native homing never
+    runs) and generate_ini() sets [TRAJ]NO_FORCE_HOMING = 1, because
+    LinuxCNC would otherwise never see status.homed become true for any
+    joint (that's tracked in this project's own Axis.is_homed() bookkeeping
+    instead) and would refuse every MDI move/program run.
+
+    True: LinuxCNC's own native homing sequence runs instead --
+    LinuxCNCAxialInterface.start_homing()/poll_homing() calls command.home(joint)
+    and waits (without blocking -- see poll_homing()) for status.joint[n]['homed'],
+    generate_hal() wires each switched
+    joint's negative-limit input to its HOME_SEARCH_VEL-driven
+    joint.N.home-sw-in pin too, and generate_ini() fills in real
+    HOME_SEARCH_VEL/HOME_LATCH_VEL/HOME_SEQUENCE values. Because LinuxCNC
+    genuinely knows every joint is homed, NO_FORCE_HOMING is left off (0)
+    -- there is no risk of LinuxCNC rejecting a subsequent MDI move or jog.
+    """
+
+    linear_ferror_in: float = 1.0 / 25.4
+    linear_min_ferror_in: float = 0.25 / 25.4
+    angular_ferror_deg: float = 1.0
+    angular_min_ferror_deg: float = 0.25
+    """
+    [JOINT_n]FERROR/MIN_FERROR for linear (X/Y/Z) and angular (A) joints --
+    the maximum following error LinuxCNC will tolerate before faulting the
+    joint (see docs/hardware_setup.md). This is the only stall/skipped-step
+    detection this machine has (see docs/potential_issues.md): none of the
+    four joints have position feedback of their own, so LinuxCNC's own
+    commanded-vs-actual comparison, using exactly these tolerances, is what
+    actually throws the fault. Tune these here (not by editing generated
+    files) once real commissioning data is available -- the shipped
+    defaults are reasonable starting points, not measured values.
+    """
 
     joints: list[JointConfiguration] = field(default_factory=list)
 
@@ -308,10 +474,31 @@ def _inverted_input_pin(pin: str) -> str:
     return f"{pin}-not"
 
 
-def generate_hal(machine: MachineConfiguration) -> str:
+#  How close a simulated joint's looped-back position has to get to its
+#  ideal 0 / max_travel before generate_hal(simulate=True)'s fake limit
+#  switches trip. Arbitrary -- there is no real switch involved, this only
+#  needs to be small relative to a joint's own travel and bigger than
+#  floating-point noise.
+_SIM_LIMIT_SWITCH_HYSTERESIS = 0.01
+
+
+def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
     """
-    Render the .hal file that wires the Mesa stepgens/GPIO to LinuxCNC's
-    motion joints for every configured joint.
+    Render the .hal file that wires this machine's joints for every
+    configured joint.
+
+    simulate=False (default): wires the real Mesa stepgens/GPIO, exactly as
+    this machine will actually run.
+
+    simulate=True: replaces the Mesa board and stepgens with a direct
+    position-command-to-feedback loopback per joint (the same pattern
+    LinuxCNC's own shipped sim configs use, see
+    /usr/share/linuxcnc/hallib/core_sim.hal) and fake limit switches built
+    from the HAL `comp` comparator component, so this exact
+    MachineConfiguration -- same joints, same units, same homing mode, same
+    INI -- can run against a real LinuxCNC instance with no physical
+    hardware attached, for testing this project's control code
+    end-to-end. See docs/potential_issues.md.
     """
 
     lines: list[str] = []
@@ -320,34 +507,94 @@ def generate_hal(machine: MachineConfiguration) -> str:
         lines.append(text)
 
     emit(f"# Generated by lcaf.utils.joint_configuration for machine '{machine.machine_name}'.")
+    if simulate:
+        emit("# SIMULATED HARDWARE -- no Mesa board, no real motors. See generate_hal() docstring.")
     emit("# Do not edit by hand -- regenerate from the machine/axis config files.")
     emit()
     emit("loadrt trivkins")
     emit(f"loadrt motmod base_period_nsec={machine.base_period_ns} servo_period_nsec={machine.servo_period_ns}")
 
-    board_line = f"loadrt {machine.mesa_board_driver}"
-    if machine.mesa_board_config:
-        board_line += f" {machine.mesa_board_config}"
-    emit(board_line)
+    if not simulate:
+        board_line = f"loadrt {machine.mesa_board_driver}"
+        if machine.mesa_board_config:
+            board_line += f" {machine.mesa_board_config}"
+        emit(board_line)
+
+    joints = sorted(machine.joints, key=lambda j: j.joint)
+
+    if simulate:
+        comp_names = [
+            name
+            for joint in joints
+            if joint.has_limit_switches
+            for name in (f"complim_{joint.axis.lower()}_neg", f"complim_{joint.axis.lower()}_pos")
+        ]
+        if comp_names:
+            emit(f"loadrt comp names={','.join(comp_names)}")
 
     emit()
-    emit("addf hm2_read-request servo-thread")
-    emit("addf motion-command-handler servo-thread")
-    emit("addf motion-controller servo-thread")
 
-    for joint in sorted(machine.joints, key=lambda j: j.joint):
-        emit(f"addf {joint.mesa_stepgen}.capture-position servo-thread")
+    if simulate:
+        emit("addf motion-command-handler servo-thread")
+        emit("addf motion-controller servo-thread")
+        for joint in joints:
+            if joint.has_limit_switches:
+                emit(f"addf complim_{joint.axis.lower()}_neg servo-thread")
+                emit(f"addf complim_{joint.axis.lower()}_pos servo-thread")
+    else:
+        emit("addf hm2_read-request servo-thread")
+        emit("addf motion-command-handler servo-thread")
+        emit("addf motion-controller servo-thread")
 
-    emit("addf hm2_write servo-thread")
+        for joint in joints:
+            emit(f"addf {joint.mesa_stepgen}.capture-position servo-thread")
+
+        emit("addf hm2_write servo-thread")
+
     emit()
     emit("net watchdog-reset <= motion.motion-enabled")
     emit()
 
-    for joint in sorted(machine.joints, key=lambda j: j.joint):
+    for joint in joints:
         emit(f"# --- Joint {joint.joint} ({joint.axis}) ---")
 
-        scale = joint.steps_per_mm
-        if joint.invert_direction:
+        if simulate:
+            pos_signal = f"{joint.axis.lower()}-pos"
+            emit(f"net {pos_signal} {joint.motor_position_command_pin} => {joint.motor_position_feedback_pin}")
+
+            if joint.has_limit_switches:
+                assert joint.max_travel is not None
+                neg_comp = f"complim_{joint.axis.lower()}_neg"
+                pos_comp = f"complim_{joint.axis.lower()}_pos"
+                hyst = _SIM_LIMIT_SWITCH_HYSTERESIS
+
+                # comp.out is TRUE when in1 > in0 (with hysteresis) -- see
+                # https://linuxcnc.org/docs/2.9/html/man/man9/comp.9.html.
+                # Negative switch: trips once position drops below ~0 (in0
+                # = live position, in1 = the near-zero threshold).
+                # Positive switch: trips once position rises above
+                # ~max_travel (in0 = the near-max_travel threshold, in1 =
+                # live position).
+                emit(f"net {pos_signal} => {neg_comp}.in0 {pos_comp}.in1")
+                emit(f"setp {neg_comp}.in1 {hyst}")
+                emit(f"setp {pos_comp}.in0 {round(joint.max_travel - hyst, 6)}")
+                emit(f"setp {neg_comp}.hyst {hyst}")
+                emit(f"setp {pos_comp}.hyst {hyst}")
+
+                neg_signal = f"{joint.axis.lower()}-neg-lim"
+                emit(f"net {neg_signal} {neg_comp}.out => {joint.negative_limit_hal_pin}")
+                if machine.use_linuxcnc_native_processes:
+                    emit(f"net {neg_signal} => {joint.joint_prefix}.home-sw-in")
+                emit(f"net {joint.axis.lower()}-pos-lim {pos_comp}.out => {joint.positive_limit_hal_pin}")
+            else:
+                emit(f"# Joint {joint.joint} ({joint.axis}) has no limit switches; homed by "
+                     "zeroing at boot (has_limit_switches=False in axis.jsonl).")
+
+            emit()
+            continue
+
+        scale = joint.steps_per_unit
+        if joint.inverted:
             scale = -scale
 
         emit(f"setp {joint.mesa_stepgen}.step_type 0")
@@ -367,18 +614,16 @@ def generate_hal(machine: MachineConfiguration) -> str:
             enable_signal += f" => {joint.enable_output}"
         emit(enable_signal)
 
-        if joint.enable_output and joint.invert_enable:
-            emit(
-                f"# NOTE: invert_enable is set for joint {joint.joint} ({joint.axis}), but the "
-                "7I76E's field outputs have no HAL-level output invert. Swap to the driver's "
-                "opposite enable terminal (or its own DIP switch) instead -- see hardware_setup.md."
-            )
-
         if joint.negative_limit_input:
             neg_pin = joint.negative_limit_input
             if joint.invert_negative_limit:
                 neg_pin = _inverted_input_pin(neg_pin)
-            emit(f"net {joint.axis.lower()}-neg-lim {neg_pin} => {joint.negative_limit_hal_pin}")
+            neg_signal = f"{joint.axis.lower()}-neg-lim"
+            emit(f"net {neg_signal} {neg_pin} => {joint.negative_limit_hal_pin}")
+            if machine.use_linuxcnc_native_processes:
+                # Same physical switch also serves as LinuxCNC's native home
+                # switch -- see MachineConfiguration.use_linuxcnc_native_processes.
+                emit(f"net {neg_signal} => {joint.joint_prefix}.home-sw-in")
         elif not joint.has_limit_switches:
             emit(f"# Joint {joint.joint} ({joint.axis}) has no limit switches; homed by "
                  "zeroing at boot (has_limit_switches=False in axis.jsonl).")
@@ -401,6 +646,27 @@ def _format_ini_value(value) -> str:
     if isinstance(value, bool):
         return "1" if value else "0"
     return str(value)
+
+
+# Default following-error tolerances. A following error is how far behind
+# its commanded position LinuxCNC will let a joint fall before faulting --
+# too tight and normal accel/decel trips false faults, too loose and a
+# genuinely stalled/skipping motor goes undetected. These are reasonable
+# starting points, not measured per-joint; expect to tune them during
+# commissioning (see docs/potential_issues.md). The actual values are
+# MachineConfiguration.linear_ferror_in / linear_min_ferror_in /
+# angular_ferror_deg / angular_min_ferror_deg -- machine-wide, configured in
+# machine.json rather than hardcoded here, so they can be tuned without
+# touching code.
+
+# Fraction of a joint's own max_velocity used as its native-homing search
+# and final latch speed when MachineConfiguration.use_linuxcnc_native_processes
+# is True. Not user-configurable: homing speed has always been a
+# conservative fixed fraction of normal running speed in this project (see
+# the previous fixed 0.03937 in/s software-homing default), not a tunable a
+# user is expected to reach for.
+_NATIVE_HOME_SEARCH_VEL_FRACTION = 0.1
+_NATIVE_HOME_LATCH_VEL_FRACTION = 0.02
 
 
 def generate_ini(machine: MachineConfiguration) -> str:
@@ -430,8 +696,11 @@ def generate_ini(machine: MachineConfiguration) -> str:
         ("MAX_FEED_OVERRIDE", "1.2"),
         ("MAX_SPINDLE_OVERRIDE", "1.0"),
         ("MIN_SPINDLE_OVERRIDE", "0.5"),
-        ("DEFAULT_LINEAR_VELOCITY", _format_ini_value(machine.default_linear_velocity_mm_s / 60.0)),
-        ("MAX_LINEAR_VELOCITY", _format_ini_value(machine.max_linear_velocity_mm_s / 60.0)),
+        # Machine units per second, literally -- the same value [TRAJ] uses
+        # below, with no per-minute conversion. See
+        # MachineConfiguration.default_linear_velocity_in_s docstring.
+        ("DEFAULT_LINEAR_VELOCITY", _format_ini_value(machine.default_linear_velocity_in_s)),
+        ("MAX_LINEAR_VELOCITY", _format_ini_value(machine.max_linear_velocity_in_s)),
     ])
 
     section("FILTER", [])
@@ -465,11 +734,19 @@ def generate_ini(machine: MachineConfiguration) -> str:
         ("COORDINATES", " ".join(coordinates)),
         ("LINEAR_UNITS", machine.linear_units),
         ("ANGULAR_UNITS", machine.angular_units),
-        ("DEFAULT_LINEAR_VELOCITY", _format_ini_value(machine.default_linear_velocity_mm_s)),
-        ("MAX_LINEAR_VELOCITY", _format_ini_value(machine.max_linear_velocity_mm_s)),
+        ("DEFAULT_LINEAR_VELOCITY", _format_ini_value(machine.default_linear_velocity_in_s)),
+        ("MAX_LINEAR_VELOCITY", _format_ini_value(machine.max_linear_velocity_in_s)),
         ("DEFAULT_ANGULAR_VELOCITY", _format_ini_value(machine.default_angular_velocity_deg_s)),
         ("MAX_ANGULAR_VELOCITY", _format_ini_value(machine.max_angular_velocity_deg_s)),
-        ("POSITION_FILE", "position.txt")
+        ("POSITION_FILE", "position.txt"),
+        # False (use_linuxcnc_native_processes=False, the default): this
+        # project's own Python homing never makes LinuxCNC's own
+        # status.homed true, so without NO_FORCE_HOMING LinuxCNC would
+        # refuse every MDI move/program run forever. True: native homing
+        # runs for real, LinuxCNC genuinely knows every joint is homed, so
+        # this is left off -- see
+        # MachineConfiguration.use_linuxcnc_native_processes.
+        ("NO_FORCE_HOMING", "0" if machine.use_linuxcnc_native_processes else "1"),
     ])
 
     section("EMCIO", [
@@ -479,35 +756,69 @@ def generate_ini(machine: MachineConfiguration) -> str:
     ])
 
     for joint in joints:
-        if joint.soft_min_mm is None or joint.soft_max_mm is None:
+        if joint.max_travel is None:
             raise ValueError(
-                f"Joint {joint.joint} ({joint.axis}) is missing soft_min_mm/soft_max_mm; "
+                f"Joint {joint.joint} ({joint.axis}) is missing max_travel; "
                 "required to generate INI travel limits."
             )
 
-        vel = joint.max_velocity_mm_s
-        accel = joint.max_acceleration_mm_s2
+        vel = joint.max_velocity
+        accel = joint.max_acceleration
+
+        ferror = machine.angular_ferror_deg if joint.is_angular else machine.linear_ferror_in
+        min_ferror = machine.angular_min_ferror_deg if joint.is_angular else machine.linear_min_ferror_in
+
+        if machine.use_linuxcnc_native_processes:
+            if joint.has_limit_switches:
+                # Seek the negative limit switch (also wired as
+                # joint.N.home-sw-in, see generate_hal()), then back off and
+                # latch at a slower speed -- the standard two-phase LinuxCNC
+                # home sequence. HOME_IGNORE_LIMITS=YES because the search
+                # deliberately drives up to the same switch the negative
+                # soft/hard limit also watches.
+                home_search_vel = -abs(vel) * _NATIVE_HOME_SEARCH_VEL_FRACTION
+                home_latch_vel = abs(vel) * _NATIVE_HOME_LATCH_VEL_FRACTION
+                home_ignore_limits = "YES"
+            else:
+                # Switchless joint (A): HOME_SEARCH_VEL=0 tells LinuxCNC to
+                # treat wherever it currently is as home, with no seek move
+                # -- LinuxCNC's own native equivalent of this project's
+                # software zero-at-boot homing.
+                home_search_vel = 0.0
+                home_latch_vel = 0.0
+                home_ignore_limits = "NO"
+            # HOME_SEQUENCE < 0 in axis.jsonl means "no explicit sequence
+            # requested" -- default to this joint's own number, so "Home
+            # All" homes joints one at a time in joint-number order.
+            home_sequence = joint.home_sequence if joint.home_sequence >= 0 else joint.joint
+        else:
+            home_search_vel = 0.0
+            home_latch_vel = 0.0
+            home_ignore_limits = "NO"
+            home_sequence = -1
 
         section(joint.ini_joint_section, [
             ("TYPE", "ANGULAR" if joint.is_angular else "LINEAR"),
             ("HOME", "0.0"),
-            ("HOME_OFFSET", _format_ini_value(joint.home_offset_mm)),
-            ("HOME_SEQUENCE", str(joint.home_sequence)),
+            ("HOME_OFFSET", "0.0"),
+            ("HOME_SEARCH_VEL", _format_ini_value(round(home_search_vel, 6))),
+            ("HOME_LATCH_VEL", _format_ini_value(round(home_latch_vel, 6))),
+            ("HOME_SEQUENCE", str(home_sequence)),
             ("HOME_USE_INDEX", "NO"),
-            ("HOME_IGNORE_LIMITS", "NO"),
+            ("HOME_IGNORE_LIMITS", home_ignore_limits),
             ("MAX_VELOCITY", _format_ini_value(vel)),
             ("MAX_ACCELERATION", _format_ini_value(accel)),
             ("STEPGEN_MAXVEL", _format_ini_value(vel * 1.2)),
             ("STEPGEN_MAXACCEL", _format_ini_value(accel * 1.2)),
-            ("MIN_LIMIT", _format_ini_value(joint.soft_min_mm)),
-            ("MAX_LIMIT", _format_ini_value(joint.soft_max_mm)),
-            ("FERROR", "1.0"),
-            ("MIN_FERROR", "0.25"),
+            ("MIN_LIMIT", _format_ini_value(joint.min_travel)),
+            ("MAX_LIMIT", _format_ini_value(joint.max_travel)),
+            ("FERROR", _format_ini_value(round(ferror, 6))),
+            ("MIN_FERROR", _format_ini_value(round(min_ferror, 6))),
         ])
 
         section(joint.ini_axis_section, [
-            ("MIN_LIMIT", _format_ini_value(joint.soft_min_mm)),
-            ("MAX_LIMIT", _format_ini_value(joint.soft_max_mm)),
+            ("MIN_LIMIT", _format_ini_value(joint.min_travel)),
+            ("MAX_LIMIT", _format_ini_value(joint.max_travel)),
             ("MAX_VELOCITY", _format_ini_value(vel)),
             ("MAX_ACCELERATION", _format_ini_value(accel)),
         ])
@@ -531,10 +842,16 @@ def generate_ini(machine: MachineConfiguration) -> str:
 def write_config_files(
     machine: MachineConfiguration,
     output_dir: str | Path,
+    simulate: bool = False,
 ) -> tuple[Path, Path]:
     """
     Render and write '<machine_name>.hal' and '<machine_name>.ini' into
     output_dir, creating it if needed. Returns (hal_path, ini_path).
+
+    simulate=True passes through to generate_hal() -- everything else
+    (joints, units, homing mode, the INI) is identical to a real run; only
+    the hardware layer is swapped for a software loopback. See
+    generate_hal()'s docstring.
     """
 
     output_dir = Path(output_dir)
@@ -543,7 +860,7 @@ def write_config_files(
     hal_path = output_dir / f"{machine.machine_name}.hal"
     ini_path = output_dir / f"{machine.machine_name}.ini"
 
-    hal_path.write_text(generate_hal(machine))
+    hal_path.write_text(generate_hal(machine, simulate=simulate))
     ini_path.write_text(generate_ini(machine))
 
     return hal_path, ini_path

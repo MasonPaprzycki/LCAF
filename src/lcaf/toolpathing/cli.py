@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .material import MATERIALS, plan_force_report
 from .toolpath_slicer import MachineLimits, SliceSettings, ToolpathPlanningError, ToolpathSlicer, load_mesh
 from .visualization import find_sufficient_cycles
 
@@ -58,7 +59,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--die-contact-z", type=float, default=0.0, help="Calibrated Z coordinate at first stock contact")
     parser.add_argument("--x-offset", type=float, default=0.0, help="Machine X coordinate for the target centre")
     parser.add_argument("--y-position", type=float, default=0.0, help="Machine Y coordinate for the tool")
-    parser.add_argument("--temperature", type=float, default=0.0, help="Target billet temperature metadata in C")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Target billet temperature in C -- together with --material, drives the "
+        "preview's deformation mechanics (how far/fast material bulges) and the separate "
+        "force estimate; never changes the planned strike coordinates themselves",
+    )
+    parser.add_argument(
+        "--material",
+        choices=MATERIALS,
+        default="steel",
+        help="Billet material -- together with --temperature, drives the preview's "
+        "deformation mechanics and the separate force estimate",
+    )
     parser.add_argument("--scale", type=float, default=1.0, help="Millimetres per input model unit")
     parser.add_argument("--axis", choices=("auto", "x", "y", "z"), default="auto", help="Billet longitudinal axis")
     parser.add_argument(
@@ -115,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         x_offset_mm=arguments.x_offset,
         y_position_mm=arguments.y_position,
         target_temperature_c=arguments.temperature,
+        material=arguments.material,
         scale_mm_per_unit=arguments.scale,
         longitudinal_axis=arguments.axis,
         stock_clamped_end=arguments.clamped_end,
@@ -146,6 +162,13 @@ def main(argv: list[str] | None = None) -> int:
         used_cycles = plan.operations[-1]["metadata"]["cycle_index"] + 1
         print(f"Converged at {used_cycles} cycle(s).")
     print(f"Wrote {len(plan.operations)} controller operations to {output}")
+    if plan.operations:
+        peak_force_kn = max(row["estimated_force_kn"] for row in plan_force_report(plan.operations))
+        print(
+            f"Estimated peak forging force: {peak_force_kn:.1f} kN ({arguments.material} at "
+            f"{arguments.temperature:.0f} C) -- a separate slab-method estimate; it does not "
+            "affect the plan above and assumes rigid, indestructible dies."
+        )
     for warning in plan.warnings:
         print(f"WARNING: {warning}")
     return 0

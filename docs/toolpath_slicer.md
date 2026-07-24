@@ -48,11 +48,15 @@ the final **machine Z coordinate**, not an inferred physical gap.
 
 ## Machine axis convention
 
-- **X** is the billet's long axis. Positive X points outward, away from the
-  clamped end, toward the free/forged end. `stock_clamped_end` (`"min"` or
-  `"max"`, see below) tells the planner which end of the *mesh's* bounding box
-  is actually clamped, since a source mesh may be authored either way; every
-  generated X is oriented so increasing X always means "away from the clamp."
+- **X** is the billet's long axis, zero-based like the machine itself:
+  **X=0 is the clamp** -- the same physical point LinuxCNC's own homing
+  gives machine X=0 (the negative limit switch end of travel), so every
+  generated X is `>= 0`. `stock_clamped_end` (`"min"` or `"max"`, see below)
+  tells the planner which end of the *mesh's* bounding box is actually
+  clamped, since a source mesh may be authored either way; every generated X
+  is measured from that end, increasing outward toward the free/forged end.
+  `x_offset_mm` adds on top of this if the clamp itself sits some fixed
+  distance from machine X=0 rather than exactly at it.
 - **Y** is the radial axis the lower die -- the one whose geometry is
   configured -- lies along.
 - **Z** is the radial axis the upper die (a flat-faced circular disc) travels
@@ -100,6 +104,12 @@ or `--auto-cycles` to keep adding cycles automatically until the simulated
 geometry matches the target within `--auto-cycles-tolerance` (default 0.5
 mm), up to `--auto-cycles-max` (default 20) before giving up with a warning.
 
+Add `--material` (`plasticine`, `aluminum`, or `steel`; default `steel`) and
+`--temperature` to make the billet material/temperature drive the
+*preview's* deformation mechanics and a separate force estimate printed
+after planning -- see [Material and temperature](#material-and-temperature)
+below. Neither flag changes the planned strike coordinates.
+
 ## Radial segments, strikes per segment, and cycles
 
 - **`--radial-segments` / `radial_segments`** (default 4): how many axial
@@ -142,8 +152,8 @@ the machine: the **lower die** (the fixed anvil, rectangular) and the
 **upper die** (the moving striker, a flat-faced circular disc). Leaving any
 of the fields below unset does not mean "unconstrained" -- it means a
 sensible physical default sized from the stock geometry, so the preview
-conserves volume by bulging displaced material sideways by default, without
-requiring you to configure die dimensions first. These settings only shape
+bulges displaced material sideways by default, without requiring you to
+configure die dimensions first. These settings only shape
 the *preview's* intermediate deformation, never the strike coordinates
 themselves -- the target's final geometry the machine actually cuts is
 unaffected by them.
@@ -182,20 +192,25 @@ rigidly holds every segment the lower die reaches, not just the nearest one
 widening the anvil's axial hold must never make the striking disc's rigid
 footprint touch a segment it wasn't asked to.
 
-Volume either footprint displaces is not deleted: it bulges the material
+Material either footprint displaces is not deleted: it relaxes smoothly,
 immediately adjacent to it -- both axially into neighbouring segments and
-tangentially around neighbouring angles -- so that volume across every
-affected segment is conserved, the same way forge-temperature steel spreads
-out from under a die rather than shrinking in volume. That bulge fades out
-within a couple of footprint dimensions of each die's edge, is capped so it
-never overshoots past the target's own boundary in that exact direction
-(never past that segment's own eventual value), and is tied entirely to that
-die's own contact interface: material outside a strike's zone of influence
-is left completely untouched by it.
+tangentially around neighbouring angles -- toward the target's own known
+boundary in that exact direction, the same way forge-temperature steel
+spreads out from under a die rather than shrinking in volume. That
+relaxation fades out within a couple of footprint dimensions of each die's
+edge, is bounded so it never overshoots past the target's own boundary in
+that exact direction (never past that segment's own eventual value), and is
+tied entirely to that die's own contact interface: material outside a
+strike's zone of influence is left completely untouched by it. Each ray's
+move toward target is a smooth, gradual blend -- never an instant jump --
+so two neighbouring rays never differ by more than a smooth taper between
+them; see [Material and temperature](#material-and-temperature) below for
+exactly how much of that blend happens per strike, and how it is no longer
+isotropic.
 
 At the default `upper_die_radius_mm` (which always fully covers the target
-at the segment it strikes), **the final shape, once every rotation has
-struck, still converges exactly to the target's own support envelope,
+at the segment it strikes), **the final shape, once enough rotations/cycles
+have struck, still converges exactly to the target's own support envelope,
 regardless of the configured lower-die size** -- the lower die's
 configuration only shapes how the intermediate animation looks, never the
 final result. This is checked directly in the test suite by comparing the
@@ -203,6 +218,64 @@ fully struck geometry against the target at every segment and orientation,
 including a counter-example that deliberately undersizes
 `upper_die_radius_mm` (and narrows the anvil, so its own generous default
 doesn't independently fill in the gap) and confirms the resulting shortfall.
+A cold/stiff material/temperature combination can likewise need more cycles
+than a hot/soft one to fully converge on the *same* die geometry -- see
+below; `--auto-cycles` keeps adding cycles until it does, and warns rather
+than silently giving up if it still has not by `--auto-cycles-max`.
+
+## Material and temperature
+
+`--material` (`plasticine`, `aluminum`, or `steel`) and `--temperature`
+(degrees C) are resolved by `lcaf.toolpathing.material` into a temperature
+band with a 0..1 `formability` -- an approximate, order-of-magnitude
+engineering estimate, not a sourced alloy datasheet or a constitutive model.
+Bands are deliberately simple (cold/warm/hot per material, roughly matched
+to where each material is actually forged in practice) rather than a
+continuous curve, for practicality. `formability` drives two purely
+geometric knobs in the *preview's* deformation mechanics (never the planned
+strike coordinates):
+
+- **`reach_scale`** (0.4..1.0) -- how far displaced material bulges from a
+  die's rigid edge. Cold/stiff material bulges tightly against the die;
+  hot/soft material spreads much further before fading out.
+- **`closure_fraction`** (0.15..1.0) -- how much of the remaining gap
+  between a ray's current position and its own known target closes this one
+  strike: ``new_radius = radius + weight * closure_fraction * (target_radius
+  - radius)``, where ``weight`` is the raised-cosine bulge profile above.
+  Every material band's ``closure_fraction`` is strictly less than 1, so a
+  single strike can never fully close that gap -- only enough strikes/
+  cycles can, which is what makes cold/stiff material genuinely take more
+  of them to fully settle onto the target, the same way real forging
+  practice needs more hits for less workable material. This bounded,
+  gradual blend (rather than solving one aggregate volume-conserving growth
+  per strike and clamping to target, an earlier version of this module's
+  approach) is also what keeps the preview continuous: no ray can jump
+  straight from untouched to sitting exactly on its final target in a
+  single strike, which previously produced a visibly discontinuous,
+  "triangulated" jump between a die's own affected rays and their
+  unaffected neighbours whenever a strike reduced (rather than grew)
+  material -- the overwhelmingly common case.
+
+Independently of material, each die footprint's own bulge margins are also
+no longer isotropic: they are biased by that footprint's own axial-vs-
+tangential aspect ratio (`_footprint_bias` in `visualization.py`), so
+material spreads preferentially in whichever direction the die itself is
+*narrower* in -- a long, narrow anvil is biased toward tangential spread; a
+short, wide one toward axial spread -- rather than the same symmetric
+distance-based falloff regardless of die shape. A square/symmetric
+footprint reduces exactly to the previous, isotropic margins.
+
+A completely separate slab-method (friction-hill) force estimate --
+`F = flow_stress * contact_area * (1 + friction * width / (3 * height))`,
+the standard closed-form flat-die forging force estimate -- is computed
+from the same material/temperature and the strike's own die geometry
+(`lcaf.toolpathing.material.estimate_operation_force_kn` /
+`plan_force_report`). It is a hand-calculation-grade estimate for process
+planning, entirely separate from the deformation preview: it never feeds
+back into planned coordinates or the animated shape, and dies are treated
+as rigid and able to supply whatever force it reports. The CLI prints the
+plan's peak estimated force; the UI has a dedicated **Force estimate** tab
+(see [the UI guide](toolpath_slicer_ui_guide.md)).
 
 ## Which end is clamped
 
@@ -237,11 +310,16 @@ exceed the stock radius even when its 0/90/180/270 faces all fit, since only
 those discrete rotations are ever struck. The planner also rejects excess
 machine X/Y/Z travel.
 
-The rotary (A) axis is continuous on this machine and is not limited by the
-planner or `configs/axis.jsonl`; any commanded rotation is valid.
+The rotary (A) axis is continuous on this machine and free to rotate either
+direction from wherever it was sitting at power-on (there is no cable-wrap
+constraint -- see `docs/hardware_setup.md`), so any signed `rotation` value
+is valid and not limited by the planner or `configs/axis.jsonl`.
 
-This model is a geometric envelope planner, not a forming simulation. It does
-not predict volume flow, flash, springback, temperature effects, die compliance,
-or tooling collisions. Its generated Z values depend on the fixture-specific
+This model is a geometric envelope planner, not a forming simulation. Material
+and temperature now give the deformation *preview* a more physically-motivated
+shape and convergence rate, and drive a separate force estimate, but neither
+is a constitutive/FEM model: this remains computational geometry, and does
+not predict true volume flow, flash, springback, die compliance, or tooling
+collisions. Its generated Z values depend on the fixture-specific
 `die_contact_z_mm` calibration. Review and prove every program off-material
 before loading it into the machine controller.

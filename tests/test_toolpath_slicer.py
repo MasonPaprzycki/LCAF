@@ -23,6 +23,13 @@ from lcaf.toolpathing.visualization import (
     material_state,
     radial_resample,
 )
+from lcaf.toolpathing.material import (
+    MATERIALS,
+    estimate_operation_force_kn,
+    formability_response,
+    plan_force_report,
+    resolve_material_band,
+)
 
 
 def box_mesh(length: float = 20.0, width: float = 10.0, height: float = 10.0) -> TriangleMesh:
@@ -84,11 +91,14 @@ def _polygon_area(points) -> float:
 
 class ToolpathSlicerTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Zero-based on every axis, matching the machine's own [0, max_travel]
+        # convention (X=0 is the clamp -- see ToolpathSlicer._x_reference /
+        # the module docstring) -- not the old symmetric-about-zero range.
         self.continuous_limits = MachineLimits(
-            x_min_mm=-50,
-            x_max_mm=50,
-            y_min_mm=-50,
-            y_max_mm=50,
+            x_min_mm=0,
+            x_max_mm=200,
+            y_min_mm=0,
+            y_max_mm=100,
             z_retracted_mm=0,
             z_extended_mm=100,
         )
@@ -180,12 +190,17 @@ class ToolpathSlicerTests(unittest.TestCase):
         min_x = [section.x_model_mm for section in clamped_at_min.sections]
         max_x = [section.x_model_mm for section in clamped_at_max.sections]
 
-        # Both orderings stay ascending in machine X...
+        # Both orderings stay ascending in machine X, starting from 0 at
+        # whichever end is actually clamped...
         self.assertEqual(min_x, sorted(min_x))
         self.assertEqual(max_x, sorted(max_x))
-        # ...but flipping which end is clamped mirrors the segment
-        # positions, since positive X always means "away from the clamp."
-        self.assertEqual(max_x, [-x for x in reversed(min_x)])
+        self.assertGreaterEqual(min(min_x), 0.0)
+        self.assertGreaterEqual(min(max_x), 0.0)
+        # ...and since X is always measured as a distance from the clamp
+        # (not from the mesh's centre), a uniform mesh like this one
+        # produces the identical sequence of offsets-from-the-clamp
+        # regardless of which end is actually clamped.
+        self.assertEqual(max_x, min_x)
 
     def test_invalid_stock_clamped_end_is_rejected(self) -> None:
         with self.assertRaisesRegex(ToolpathPlanningError, "stock_clamped_end"):
@@ -475,7 +490,10 @@ class ToolpathSlicerTests(unittest.TestCase):
         ).plan()
 
         segment_x = [section.x_model_mm for section in plan.sections]
-        self.assertEqual(segment_x, [-8.0, -4.0, 0.0, 4.0, 8.0])
+        # X=0 is the clamp (the mesh's own min-X bound here, the default
+        # stock_clamped_end), not the mesh's centre -- see
+        # ToolpathSlicer._x_reference / the module docstring.
+        self.assertEqual(segment_x, [2.0, 6.0, 10.0, 14.0, 18.0])
         before = [material_cross_section(plan, s, 0, 0.0) for s in range(len(plan.sections))]
         after = [material_cross_section(plan, s, 0, 1.0) for s in range(len(plan.sections))]
 
@@ -501,22 +519,30 @@ class ToolpathSlicerTests(unittest.TestCase):
         self.assertNotAlmostEqual(after[1][12][1], 7.5, places=1)
         # ...though its bulge *margin* (unavoidably, symmetric to the
         # anvil's own margin below) can still reach the immediately
-        # adjacent segment, pulling it toward -- but never past -- its own
-        # eventual target (5.0, the same everywhere on this constant-profile
-        # box), which segment 1's own dedicated strike would reach anyway.
-        self.assertAlmostEqual(after[1][12][1], 5.0, places=2)
+        # adjacent segment, nudging it partway toward -- never all the way
+        # to, and never past -- its own eventual target (5.0, the same
+        # everywhere on this constant-profile box) after just this one
+        # strike: the relaxation is a bounded, gradual blend each strike,
+        # never an instant snap to the final value (see the module
+        # docstring in visualization.py on why that continuity matters).
+        self.assertLess(after[1][12][1], 10.0)
+        self.assertGreater(after[1][12][1], 5.0)
 
         # ...but the fixed anvil, rigidly spanning +/-4.5 mm from segment 0
-        # (at x=-8) plus a further +/-9 mm bulge margin (13.5 mm total),
-        # rigidly holds segment 1 (at x=-4, 4 mm away)...
+        # (at x=-8), rigidly holds segment 1 (at x=-4, 4 mm away)...
         self.assertAlmostEqual(after[0][36][1], -10.0, places=5)
         self.assertAlmostEqual(after[1][36][1], -10.0, places=5)
-        # ...and its bulge margin reaches as far as segment 3 (at x=4,
-        # 12 mm away, within the 13.5 mm margin), nudging it toward -- but
-        # never past -- its own target, the same way the disc's margin did
-        # for segment 1 above.
+        # ...but this anvil's own footprint is axially elongated (9 mm long,
+        # only 6 mm wide): the confinement-weighted bulge model now biases
+        # its spread toward the tangential direction it is *narrow* in
+        # (already demonstrated above -- segment 1's disc pole reaches its
+        # full tangential target), not further axially past its own already-
+        # long rigid reach, so segment 3 (12 mm away) falls outside its
+        # (now smaller) axial bulge margin regardless of material/temperature
+        # and is left untouched -- see test_anvil_aspect_ratio_biases_bulge_direction
+        # for a direct isolation of this effect.
         self.assertAlmostEqual(after[3][12][1], 10.0, places=5)
-        self.assertAlmostEqual(after[3][36][1], -5.0, places=2)
+        self.assertAlmostEqual(after[3][36][1], -10.0, places=5)
 
         # Segment 4 (16 mm away) is genuinely outside the anvil's length
         # plus its bulge margin and is left completely untouched.
@@ -580,6 +606,33 @@ class ToolpathSlicerTests(unittest.TestCase):
         # ...and the disc is simply not present beyond its own radius.
         self.assertIsNone(disc_contact_profile(5.0, 5.1, 10.0))
         self.assertIsNone(disc_contact_profile(None, 0.0, 10.0))
+
+    def test_disc_rim_profile_matches_the_circular_footprint_when_unclipped(self) -> None:
+        from lcaf.toolpathing.visualization import disc_rim_profile
+
+        # Narrower than its own segment: the true footprint never reaches
+        # the segment boundary, so the rim is simply the full circle.
+        rim = disc_rim_profile(3.0, 10.0, sides=16)
+        self.assertEqual(len(rim), 16)
+        for axial, tangential in rim:
+            self.assertAlmostEqual(axial**2 + tangential**2, 9.0, places=6)
+
+    def test_disc_rim_profile_clips_axially_at_full_radius_tangentially(self) -> None:
+        from lcaf.toolpathing.visualization import disc_rim_profile
+
+        # Wider than its own segment: the rim must never overshoot the
+        # segment axially, but must still reach the die's full radius
+        # tangentially at the segment's own centre -- the same
+        # sqrt(R**2 - a**2) footprint disc_contact_profile/_apply_strike_3d
+        # already use, expressed as a polygon instead of a per-station
+        # formula. A 3D renderer that instead uniformly shrinks the whole
+        # circle to fit the segment (the historical bug) would understate
+        # this tangential reach.
+        rim = disc_rim_profile(10.0, 2.5, sides=24)
+        self.assertAlmostEqual(max(abs(axial) for axial, _ in rim), 2.5, places=6)
+        self.assertAlmostEqual(max(abs(tangential) for _, tangential in rim), 10.0, places=6)
+        for axial, _ in rim:
+            self.assertLessEqual(abs(axial), 2.5 + 1e-6)
 
     def test_both_footprints_conserve_and_bulge_simultaneously(self) -> None:
         # A small anvil AND a small upper die radius active on the same
@@ -828,6 +881,261 @@ class ToolpathSlicerTests(unittest.TestCase):
         ring = radial_resample(((-5, -5), (5, -5), (5, 5), (-5, 5)), radial_segments=32)
         self.assertAlmostEqual(ring[0][0], 5.0, places=5)
         self.assertAlmostEqual(ring[8][1], 5.0, places=5)
+
+    # -- Material/temperature-driven deformation mechanics ----------------
+
+    def test_unknown_material_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ToolpathPlanningError, "Unknown material"):
+            SliceSettings(stock_radius_mm=10, material="unobtainium").validate()
+
+    def test_material_is_recorded_on_every_operation_but_defaults_to_steel(self) -> None:
+        plan = ToolpathSlicer(
+            box_mesh(), SliceSettings(stock_radius_mm=10, radial_segments=2), self.continuous_limits
+        ).plan()
+        self.assertTrue(all(op["metadata"]["material"] == "steel" for op in plan.operations))
+
+    def test_material_and_temperature_never_change_the_planned_strike_coordinates(self) -> None:
+        # Material/temperature drive the deformation *preview* and the
+        # separate force estimate only -- the machine-facing coordinates a
+        # STRIKE operation actually commands (x/y/die_gap/rotation) must be
+        # identical regardless of which material or temperature is chosen.
+        def coordinates(material: str, temperature_c: float) -> list[tuple[float, float, float, float]]:
+            plan = ToolpathSlicer(
+                box_mesh(),
+                SliceSettings(
+                    stock_radius_mm=10,
+                    radial_segments=2,
+                    strikes_per_segment=4,
+                    max_reduction_per_strike_mm=3,
+                    die_contact_z_mm=10,
+                    material=material,
+                    target_temperature_c=temperature_c,
+                ),
+                self.continuous_limits,
+            ).plan()
+            return [(op["x"], op["y"], op["die_gap"], op["rotation"]) for op in plan.operations]
+
+        self.assertEqual(coordinates("steel", 0.0), coordinates("aluminum", 450.0))
+        self.assertEqual(coordinates("steel", 0.0), coordinates("plasticine", 25.0))
+
+    def test_footprint_bias_favors_the_direction_a_die_is_narrower_in(self) -> None:
+        from lcaf.toolpathing.visualization import _footprint_bias
+
+        # A square footprint is unbiased.
+        axial_bias, tangential_bias = _footprint_bias(10.0, 10.0)
+        self.assertAlmostEqual(axial_bias, 0.5, places=6)
+        self.assertAlmostEqual(tangential_bias, 0.5, places=6)
+
+        # A long, narrow footprint (large axial extent, small tangential
+        # extent) is biased toward spreading tangentially -- the direction
+        # it is smaller, and therefore less confining, in.
+        axial_bias, tangential_bias = _footprint_bias(18.0, 2.0)
+        self.assertLess(axial_bias, 0.5)
+        self.assertGreater(tangential_bias, 0.5)
+
+        # ...and the reverse for a short, wide footprint.
+        axial_bias, tangential_bias = _footprint_bias(2.0, 18.0)
+        self.assertGreater(axial_bias, 0.5)
+        self.assertLess(tangential_bias, 0.5)
+
+    def test_anvil_aspect_ratio_biases_which_direction_bulge_reaches_further(self) -> None:
+        # Same axial length (die_length_mm=9) on both anvils, only the width
+        # differs: a narrow anvil is biased to spread tangentially instead of
+        # reaching further axially, so it does *not* nudge segment 3 (12 mm
+        # away) at all; a wide anvil is biased the other way and does reach
+        # it -- nudging it partway toward (never all the way to, in just one
+        # strike) its own eventual target. material/temperature pinned hot
+        # (formability close to 1) so this isolates the geometric aspect-
+        # ratio effect from the separate material-driven reach scaling
+        # covered elsewhere.
+        def segment_3_anvil_pole(die_width_mm: float) -> float:
+            plan = ToolpathSlicer(
+                box_mesh(),
+                SliceSettings(
+                    stock_radius_mm=10,
+                    radial_segments=5,
+                    strikes_per_segment=4,
+                    max_reduction_per_strike_mm=3,
+                    die_contact_z_mm=10,
+                    die_width_mm=die_width_mm,
+                    die_length_mm=9,
+                    material="aluminum",
+                    target_temperature_c=450.0,
+                ),
+                self.continuous_limits,
+            ).plan()
+            after = material_cross_section(plan, station_index=3, operation_index=0, operation_progress=1.0)
+            return after[36][1]
+
+        self.assertAlmostEqual(segment_3_anvil_pole(2.0), -10.0, places=5)
+        wide_result = segment_3_anvil_pole(20.0)
+        self.assertGreater(wide_result, -10.0)
+        self.assertLess(wide_result, -5.0)
+
+    def test_cold_stiff_material_needs_more_cycles_to_converge_than_hot_material(self) -> None:
+        # With a die too narrow for cold steel's (formability ~0.05) reduced
+        # bulge reach to bridge the target's corners, find_sufficient_cycles
+        # must honestly give up (warn) within a handful of cycles rather than
+        # silently returning an unconverged plan -- while the identical
+        # geometry with hot steel (formability ~0.85) converges immediately.
+        # This is the intended, felt effect of "temperature" on the preview:
+        # the *shape* still converges given enough cycles for workable
+        # material/temperature combinations, but genuinely does not for an
+        # impractical one, exactly like real forging practice.
+        def converges(temperature_c: float) -> tuple[int, bool]:
+            plan = find_sufficient_cycles(
+                box_mesh(),
+                SliceSettings(
+                    stock_radius_mm=10,
+                    radial_segments=2,
+                    strikes_per_segment=4,
+                    max_reduction_per_strike_mm=3,
+                    die_contact_z_mm=10,
+                    die_width_mm=3.0,
+                    upper_die_radius_mm=3.0,
+                    material="steel",
+                    target_temperature_c=temperature_c,
+                ),
+                self.continuous_limits,
+                max_cycles=5,
+                tolerance_mm=0.5,
+            )
+            used_cycles = plan.operations[-1]["metadata"]["cycle_index"] + 1
+            gave_up = any("max_cycles" in warning for warning in plan.warnings)
+            return used_cycles, gave_up
+
+        cold_cycles, cold_gave_up = converges(0.0)
+        hot_cycles, hot_gave_up = converges(1100.0)
+        self.assertTrue(cold_gave_up)
+        self.assertFalse(hot_gave_up)
+        self.assertGreater(cold_cycles, hot_cycles)
+
+    def test_bulge_never_jumps_discontinuously_between_neighbouring_rays_or_stations(self) -> None:
+        # Regression test for a reported bug: an earlier version of the bulge
+        # mechanic solved one aggregate volume-conserving "growth" per strike
+        # and clamped each touched ray to min(row * (1 + weight * growth),
+        # target) -- for the overwhelmingly common case of a reducing target
+        # (target < the ray's current, pristine radius), *any* nonzero
+        # weight caused an instant, full snap straight to the target, while
+        # the immediately neighbouring (zero-weight) ray stayed completely
+        # untouched: a hard step, rendered as a "triangulated" spike rather
+        # than a smooth bulge. The relaxation must instead move only
+        # partway, continuously, so no two angularly- or axially-adjacent
+        # samples should ever differ by anywhere near the full stock-radius-
+        # to-target distance after a single strike.
+        stock_radius = 10.0
+        max_reasonable_jump_mm = 0.3 * stock_radius
+
+        # Angular (tangential) continuity: a narrow die on a reducing target,
+        # checked after just its own first strike.
+        plan = ToolpathSlicer(
+            box_mesh(),
+            SliceSettings(
+                stock_radius_mm=stock_radius,
+                radial_segments=2,
+                strikes_per_segment=4,
+                max_reduction_per_strike_mm=3,
+                die_contact_z_mm=10,
+                die_width_mm=6,
+                die_length_mm=1,
+            ),
+            self.continuous_limits,
+        ).plan()
+        for operation_index in range(3):
+            ring = material_cross_section(
+                plan, station_index=0, operation_index=operation_index, operation_progress=1.0, radial_segments=48
+            )
+            radii = [math.hypot(y, z) for y, z in ring]
+            max_angular_jump = max(
+                abs(radii[i] - radii[(i + 1) % len(radii)]) for i in range(len(radii))
+            )
+            self.assertLess(
+                max_angular_jump, max_reasonable_jump_mm,
+                f"operation_index={operation_index} has a discontinuous angular jump of {max_angular_jump:.3f} mm",
+            )
+
+        # Axial continuity: a wide anvil spanning several segments, checked
+        # after just its own first strike.
+        plan = ToolpathSlicer(
+            box_mesh(),
+            SliceSettings(
+                stock_radius_mm=stock_radius,
+                radial_segments=5,
+                strikes_per_segment=4,
+                max_reduction_per_strike_mm=3,
+                die_contact_z_mm=10,
+                die_width_mm=6,
+                die_length_mm=9,
+            ),
+            self.continuous_limits,
+        ).plan()
+        state = material_state(plan, operation_index=0, operation_progress=1.0, radial_segments=48)
+        for angle_index in range(48):
+            radii = [math.hypot(*station[angle_index]) for station in state]
+            max_axial_jump = max(abs(radii[i + 1] - radii[i]) for i in range(len(radii) - 1))
+            self.assertLess(
+                max_axial_jump, max_reasonable_jump_mm,
+                f"angle_index={angle_index} has a discontinuous axial jump of {max_axial_jump:.3f} mm",
+            )
+
+    def test_formability_response_scales_reach_and_closure_between_documented_bounds(self) -> None:
+        cold = formability_response(0.0)
+        hot = formability_response(1.0)
+        self.assertAlmostEqual(cold.reach_scale, 0.4, places=6)
+        self.assertAlmostEqual(cold.closure_fraction, 0.15, places=6)
+        self.assertAlmostEqual(hot.reach_scale, 1.0, places=6)
+        self.assertAlmostEqual(hot.closure_fraction, 1.0, places=6)
+        # Monotonic in between.
+        middle = formability_response(0.5)
+        self.assertLess(cold.reach_scale, middle.reach_scale)
+        self.assertLess(middle.reach_scale, hot.reach_scale)
+
+    def test_resolve_material_band_picks_the_band_containing_the_temperature(self) -> None:
+        cold_steel = resolve_material_band("steel", 20.0)
+        hot_steel = resolve_material_band("STEEL", 1100.0)  # case-insensitive
+        self.assertLess(cold_steel.formability, hot_steel.formability)
+        self.assertGreater(cold_steel.flow_stress_mpa, hot_steel.flow_stress_mpa)
+        with self.assertRaises(ValueError):
+            resolve_material_band("unobtainium", 20.0)
+
+    def test_estimate_operation_force_increases_with_flow_stress_and_contact_area(self) -> None:
+        def force_for(material: str, temperature_c: float, die_width_mm: float = 6.0) -> float:
+            operation = {
+                "target_temperature": temperature_c,
+                "metadata": {
+                    "stock_radius_mm": 10.0,
+                    "target_support_mm": 5.0,
+                    "die_width_mm": die_width_mm,
+                    "upper_die_radius_mm": 6.0,
+                    "die_length_mm": 6.0,
+                    "material": material,
+                },
+            }
+            return estimate_operation_force_kn(operation)
+
+        # Same geometry: hot steel needs far more force than hot aluminum,
+        # which needs more than warm plasticine -- following each material's
+        # own flow stress ordering.
+        self.assertGreater(force_for("steel", 1100.0), force_for("aluminum", 450.0))
+        self.assertGreater(force_for("aluminum", 450.0), force_for("plasticine", 25.0))
+        # A wider contact patch (more area) needs more force for the same material.
+        self.assertGreater(force_for("steel", 1100.0, die_width_mm=12.0), force_for("steel", 1100.0, die_width_mm=6.0))
+
+    def test_plan_force_report_covers_every_operation_with_positive_estimates(self) -> None:
+        plan = ToolpathSlicer(
+            box_mesh(),
+            SliceSettings(stock_radius_mm=10, radial_segments=2, material="steel", target_temperature_c=1100.0),
+            self.continuous_limits,
+        ).plan()
+        report = plan_force_report(plan.operations)
+        self.assertEqual(len(report), len(plan.operations))
+        self.assertTrue(all(row["estimated_force_kn"] > 0.0 for row in report))
+        self.assertTrue(all(row["material"] == "steel" for row in report))
+
+    def test_all_materials_constant_is_a_valid_choice_for_every_entry(self) -> None:
+        for material in MATERIALS:
+            with self.subTest(material=material):
+                SliceSettings(stock_radius_mm=10, material=material).validate()
 
 
 if __name__ == "__main__":

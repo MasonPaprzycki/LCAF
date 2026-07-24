@@ -230,14 +230,27 @@ Current Responsibilities
 
 - Exit to COMPLETE_TOOLPATH if there is no operation left in the queue
 
-- Increment to the next step in the queue and read it to get the upcoming JSON 
-operation.
+- Retrieve the current ToolpathOperation from the queue (JSON decoding
+  already happened once, for the whole file, back in load_jsonl() -- not
+  redone per step here)
 
-- Store current operation 
-- Decode JSON operation
-- Select operation type
-- Validate target coordinates
-- Pass ToolpathOperation to MotionCoordinator for expansion into motion commands. 
+- Pass the ToolpathOperation to MotionCoordinator for expansion into motion
+  commands, unconditionally, through the same retract/rotate/move sequence
+  regardless of the operation's own `operation` field -- STRIKE, REHEAT,
+  INSPECT, DWELL, MOVE_ONLY, and CUSTOM are not currently distinguished
+
+- Advance the queue and record the completed step once MotionCoordinator
+  reports the operation done
+
+Not yet implemented
+
+- Per-operation-type dispatch (e.g. a REHEAT or DWELL operation doing
+  something other than the full physical motion sequence a STRIKE does)
+- Target coordinate validation before handing the operation to
+  MotionCoordinator
+
+Neither is exercised today since `lcaf.toolpathing` (see
+[toolpath_slicer.md](toolpath_slicer.md)) only ever emits STRIKE operations.
 
 EXECUTE_OPERATION
 
@@ -939,9 +952,26 @@ All motion execution is delegated to LinuxCNC, while the Axis object serves only
 
 # LinuxCNC Interface
 
-LinuxCNCInterface intentionally contains **no state machine**.
+The LinuxCNC Interface intentionally contains **no state machine**. It is
+split into two classes (`lcaf.control.linuxcnc_interface`), the only module
+that imports `linuxcnc`/`hal`:
 
-Its sole responsibility is translating ForgeBrain requests into LinuxCNC API calls and exposing LinuxCNC status back to the controller.
+- **LinuxCNCMachineInterface**: one instance, owning the single shared
+  `linuxcnc.command()`/`stat()`/`error_channel()` connection for the whole
+  machine (LinuxCNC exposes one NML channel total, not one per joint).
+  Answers machine-wide queries (`machine_on`, `estop`, `all_homed`) and
+  issues machine-wide commands (`machine_on_command`, `machine_off`,
+  `estop_command`, `estop_reset`, `abort`). This is the object
+  MotionCoordinator publishes as `self.interface` for ForgeBrain to query.
+- **LinuxCNCAxialInterface**: one instance per joint, wrapping that same
+  shared connection for its own joint number. Translates Axis requests into
+  per-joint LinuxCNC API calls -- MDI motion (`move`, `dwell`, `jog`),
+  homing (native LinuxCNC homing or this project's own software
+  limit-switch homing, per `machine.json`'s `use_linuxcnc_native_processes`),
+  and status/fault reads -- and exposes that joint's LinuxCNC status back to
+  Axis.
+
+Its sole responsibility is translating ForgeBrain/MotionCoordinator/Axis requests into LinuxCNC API calls and exposing LinuxCNC status back to the controller.
 
 ```
 ForgeBrain
@@ -956,7 +986,7 @@ Axis
 
 ↓
 
-LinuxCNC Interface
+LinuxCNC Interface (LinuxCNCMachineInterface + LinuxCNCAxialInterface)
 
 ↓
 

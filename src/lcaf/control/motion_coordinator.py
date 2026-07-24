@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum, auto
+import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -64,17 +66,28 @@ class MotionCoordinator:
         machine_config: MachineConfiguration | None = None,
         machine_config_path: str | Path = _DEFAULT_MACHINE_CONFIG,
         generated_config_dir: str | Path = _DEFAULT_GENERATED_DIR,
+        simulate: bool = False,
     ):
         self.logger = logging.getLogger("ForgeBrain.Motion")
 
         if machine_config is None:
             machine_config = load_machine_configuration(machine_config_path)
 
+        generated_config_dir = Path(generated_config_dir)
+
         # Regenerate the .hal/.ini pair LinuxCNC operates on so the joint
         # config below is always what's actually running on the machine.
-        write_config_files(machine_config, generated_config_dir)
+        # simulate=True generates a software-loopback HAL with no physical
+        # hardware (see generate_hal()) -- everything above this line is
+        # otherwise identical, so this is a way to run this exact
+        # MachineConfiguration against a real LinuxCNC instance for testing.
+        write_config_files(machine_config, generated_config_dir, simulate=simulate)
 
-        self.interface = LinuxCNCMachineInterface()
+        self.machine_config = machine_config
+
+        self.interface = LinuxCNCMachineInterface(
+            use_native_homing=machine_config.use_linuxcnc_native_processes
+        )
 
         self.axes = {
             joint.axis.lower(): Axis(joint, self.interface)
@@ -90,6 +103,69 @@ class MotionCoordinator:
         self.command_sent = False
 
         self.fault_message = ""
+
+        # See _write_homed_properties()/_warn_if_not_homed() below: a
+        # diagnostic record of the last successful homing, plus a startup
+        # warning that this process instance has not homed yet. This file
+        # is never read back to skip homing -- every process start still
+        # requires a fresh home_all() (see docs/potential_issues.md on why
+        # this machine can't detect being moved while unpowered).
+        self.homed_properties_path = generated_config_dir / "homed_properties.json"
+        self._homed_properties_written = False
+        self._warn_if_not_homed()
+
+    def _warn_if_not_homed(self):
+        """
+        Prompt a startup warning that this process instance has not
+        completed homing yet -- true unconditionally right after
+        construction, since home_all() hasn't had a chance to run. Distinct
+        message depending on whether a homed_properties.json from some
+        earlier session/boot exists, purely so the operator knows whether
+        this machine has ever homed successfully at all.
+        """
+        if self.homed_properties_path.exists():
+            self.logger.warning(
+                f"{self.homed_properties_path} exists from a previous session, but this "
+                "machine has NOT been homed yet in this session -- motion commands will be "
+                "rejected until home_all() completes. (Homing is always required fresh on "
+                "every boot; this file is a diagnostic record, not a homed-state cache.)"
+            )
+        else:
+            self.logger.warning(
+                f"No {self.homed_properties_path.name} found -- this machine has never "
+                "completed homing. Motion commands will be rejected until home_all() completes."
+            )
+
+    def _write_homed_properties(self):
+        """
+        Persist a diagnostic record of the homing this process instance just
+        completed: per-axis measured/configured travel limits and position
+        at completion, plus which homing strategy was used. Called once,
+        from poll(), the first time homing_complete() becomes true. This is
+        an audit/troubleshooting record only -- it is never read back to
+        skip homing on a later boot (see docs/potential_issues.md).
+        """
+        properties = {
+            "homed_at_unix": datetime.now(timezone.utc).timestamp(),
+            "homed_at_iso": datetime.now(timezone.utc).isoformat(),
+            "use_linuxcnc_native_processes": self.interface.use_native_homing,
+            "axes": {
+                name: {
+                    "joint": axis.joint,
+                    "is_angular": axis.axial_interface.joint.is_angular,
+                    "min_limit_native": axis.axial_interface.min_limit["native"],
+                    "max_limit_native": axis.axial_interface.max_limit["native"],
+                    "min_limit_mm": axis.axial_interface.min_limit["mm"],
+                    "max_limit_mm": axis.axial_interface.max_limit["mm"],
+                    "position_native": axis.axial_interface.get_position(),
+                }
+                for name, axis in self.axes.items()
+            },
+        }
+
+        self.homed_properties_path.parent.mkdir(parents=True, exist_ok=True)
+        self.homed_properties_path.write_text(json.dumps(properties, indent=2))
+        self.logger.info(f"Wrote homing record to {self.homed_properties_path}")
 
     def poll(self):
         """
@@ -115,6 +191,10 @@ class MotionCoordinator:
 
                 raise
 
+        if not self._homed_properties_written and self.homing_complete():
+            self._write_homed_properties()
+            self._homed_properties_written = True
+
 
     def all_idle(self):
         """
@@ -137,15 +217,56 @@ class MotionCoordinator:
 
         return True
 
+    def _position_tolerance(self, axis: Axis) -> float:
+        """
+        How close axis.position() has to be to a commanded target to count
+        as "arrived," in the same machine units axis.position() itself
+        returns (millimetres for a linear joint, degrees for the angular
+        one -- see Axis.position()). None of these joints have real
+        position feedback (see docs/potential_issues.md) -- LinuxCNC's own
+        MIN_FERROR (machine.json's linear_min_ferror_in/angular_min_ferror_deg,
+        the same tolerance LinuxCNC itself uses to decide a joint has
+        settled) is the most trustworthy number available for this, rather
+        than inventing a separate one.
+        """
+        joint = axis.axial_interface.joint
+        if joint.is_angular:
+            return self.machine_config.angular_min_ferror_deg
+        return self.machine_config.linear_min_ferror_in * 25.4
+
     def is_axis_in_position(self, axis: str, position: float):
+        """
+        True once LinuxCNC itself considers the joint settled (Axis.is_idle()
+        -- joint.inpos plus a real velocity tolerance) AND axis.position() is
+        within this joint's own configured MIN_FERROR of the requested
+        target. Exact float equality never actually happens on a real (or
+        simulated) trajectory, so this used to hang here forever -- see
+        docs/potential_issues.md.
+        """
         if axis not in self.axes:
             self.logger.error(f"Invalid axis command: axis={axis}")
             raise ValueError(f"Unknown axis {axis}")
 
-        if self.axes[axis].position() == position:
-            return True
-        else:
+        axis_obj = self.axes[axis]
+
+        if not axis_obj.is_idle():
             return False
+
+        tolerance = self._position_tolerance(axis_obj)
+        return abs(axis_obj.position() - position) <= tolerance
+
+    def first_faulted_axis(self) -> Optional[str]:
+        """
+        Name of the first axis currently in AxisState.FAULT, or None if none
+        are faulted. Checked during operation execution (update() below) and
+        by ForgeBrain during INITIALIZING (a homing failure also lands here,
+        since LinuxCNCAxialInterface.poll_homing() failures are surfaced as
+        Axis.FAULT -- see axis.py).
+        """
+        for name, axis in self.axes.items():
+            if axis.has_fault():
+                return name
+        return None
 
 
     def move_axis(self, axis: str, position: float):
@@ -205,9 +326,6 @@ class MotionCoordinator:
                 self.logger.exception(f"HOMING FAILED: axis={name}, error={e}")
                 raise
 
-        for name, axis in self.axes.items():
-            axis.home()
-
         self.logger.info( "HOMING COMMANDS ISSUED: all axes")
 
     def all_homed(self):
@@ -250,6 +368,13 @@ class MotionCoordinator:
     def update(self, telemetry=None):
 
         if self.active_operation is None:
+            return
+
+        faulted_axis = self.first_faulted_axis()
+        if faulted_axis is not None:
+            self.fault_message = f"Axis '{faulted_axis}' faulted (following error)."
+            self.logger.error(self.fault_message)
+            self.state = MotionCoordinatorState.FAULT
             return
 
         operation = self.active_operation

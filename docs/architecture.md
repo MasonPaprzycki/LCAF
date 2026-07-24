@@ -85,17 +85,29 @@ Responsibilities:
 
 # LinuxCNCInterface
 
-Thin abstraction over LinuxCNC.
+Thin abstraction over LinuxCNC, split into two classes in
+`linuxcnc_interface.py` (the only module that imports `linuxcnc`/`hal`):
 
-Responsibilities: 
+**LinuxCNCMachineInterface** -- one instance, shared by every axis. LinuxCNC
+exposes a single command/status/error-channel connection (NML) for the
+whole machine, not one per joint, so this is the one object that owns it.
 
-    - Machine status
-    - Machine commands
-    - MDI
-    - HAL
-    - Error channel
+    - Machine-wide status (machine_on, estop, all_homed)
+    - Machine-wide commands (machine_on_command, machine_off, estop_command,
+      estop_reset, abort)
+    - Error channel draining
 
-Note: No supervisory logic.
+**LinuxCNCAxialInterface** -- one instance per joint, wrapping the shared
+LinuxCNCMachineInterface's connection for that joint alone.
+
+    - Per-joint status (position, velocity, enabled, in-position, faulted)
+    - MDI-issued motion (move, dwell, jog)
+    - Homing (native LinuxCNC homing or this project's own software
+      limit-switch homing, depending on machine.json's
+      use_linuxcnc_native_processes)
+    - Raw HAL limit-switch reads
+
+Note: No supervisory logic in either class.
 
 # LinuxCNC
 

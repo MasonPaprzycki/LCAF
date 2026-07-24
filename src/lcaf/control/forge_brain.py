@@ -167,14 +167,19 @@ class ForgeBrain:
 
     def update(self, telemetry):
 
+        # telemetry.forge_mode/motion_state are this same SystemState's own
+        # values, broadcast for *other* subscribers (see
+        # TelemetrySnapshot) -- not read back here, since self.state.motion_state
+        # is already authoritative and managed by set_motion_state() below.
         self.state.machine_enabled = telemetry.machine_enabled
         self.state.machine_homed = telemetry.machine_homed
         self.state.estop = telemetry.estop
-        self.state.motion_state = telemetry.motion_state
         self.state.billet_temperature = telemetry.billet_temperature
         self.state.last_update = telemetry.timestamp
 
-        self.motion.update(telemetry)
+        # Advancing self.motion's own HFSM happens once per heartbeat, from
+        # process_state_machine() -> execute_operation() below -- not here.
+        # This callback only absorbs the broadcast snapshot.
 
     def process_state_machine(self):
         state = self.state.brain_state
@@ -338,6 +343,11 @@ class ForgeBrain:
 
         
         if not interface.all_homed():
+
+            faulted_axis = self.motion.first_faulted_axis()
+            if faulted_axis is not None:
+                self.set_fault(f"Axis '{faulted_axis}' faulted while homing.")
+                return
 
             if self.state.motion_state != MotionState.MOVING:
                 self.motion.home_all()

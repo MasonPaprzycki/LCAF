@@ -7,13 +7,12 @@ strike by strike, by the die that struck it.  No constitutive/thermal model
 is used -- only computational geometry.
 
 Two rigid surfaces act on every strike, matching the machine: a moving
-(striking) die and a fixed anvil it presses the billet against.  Both now
-have a real, finite contact footprint by default -- rather than one side
-being an unconstrained infinite plane -- so that material a strike displaces
-is never simply deleted: it bulges into the immediately adjacent stations
-(axially) and angles (tangentially), conserving volume, the way
-forge-temperature steel actually spreads out from under a die rather than
-shrinking.
+(striking) die and a fixed anvil it presses the billet against. Both have a
+real, finite contact footprint by default -- rather than one side being an
+unconstrained infinite plane -- so that material a strike displaces is never
+simply deleted: it relaxes smoothly into the immediately adjacent stations
+(axially) and angles (tangentially), the way forge-temperature steel
+actually spreads out from under a die rather than shrinking.
 
 - The **striking die** (the +normal side, machine +Z) is a flat-faced
   **circular disc** of radius ``upper_die_radius_mm``, confined -- exactly
@@ -24,35 +23,84 @@ shrinking.
   it wasn't asked to. Its radius instead controls how far it reaches
   *tangentially* at that one station: a tangential offset beyond
   ``upper_die_radius_mm`` is simply outside the disc, exactly as a
-  tangential offset beyond the anvil's own half-width is outside it. Bulge
-  growth around the disc's rigid edge fades with a single tangential
-  raised-cosine factor, confined to that same one station (no axial term,
-  since the disc itself never leaves it).
+  tangential offset beyond the anvil's own half-width is outside it.
 - The **anvil** (the -normal side, machine -Z) never moves. It is the
   rectangular prism described by ``die_width_mm``/``die_length_mm``
   (optionally rounded at its tangential edges by ``die_corner_radius_mm``):
   within that footprint it is an impenetrable displacement boundary holding
   material at the original stock surface (it never reduces anything, only
   prevents bulging past where the billet already rests); outside it, the
-  anvil is simply not there. Its bulge fade is the product of independent
-  axial and tangential raised-cosine factors, appropriate for a rectangle
-  that -- unlike the disc -- can genuinely reach neighbouring stations.
+  anvil is simply not there.
 
-Both footprints share one closed-form volume-conservation solve per strike:
-since the striking side only ever touches rays on the +normal hemisphere and
-the anvil side only the -normal hemisphere, their bulge weights can never
-collide, so a single quadratic solve (see ``_solve_growth_for_target``)
-recovers however much of the pre-strike volume, across every touched
-station, both footprints' bulge margins were asked to conserve. That bulge
-fades out within a couple of footprint dimensions of each die's edge, is
-capped so it never overshoots the target's own boundary in that exact
-direction, and is tied entirely to that die's own contact interface: material
-outside a strike's zone of influence is left completely untouched by it.
+Bulge growth is a smooth, bounded *relaxation toward the target* -- not a
+volume-conservation solve. Each affected ray moves a fraction of the way
+from wherever it currently sits toward the target's own known boundary in
+that exact direction, whether that means growing (material spilling
+sideways from a narrow die) or shrinking (a neighbouring station easing
+toward its own smaller eventual value ahead of its own dedicated strike):
+
+    new_radius = radius + weight * closure_fraction * (target_radius - radius)
+
+``weight`` is the product of an axial and a tangential raised-cosine
+factor, exactly ``1`` at a die's rigid edge (continuous with the rigid clip
+itself) and fading smoothly to exactly ``0`` a margin's width away -- so it,
+and therefore ``new_radius``, varies continuously with position: no ray can
+jump straight from "completely untouched" to "sitting exactly on its final
+target" the way solving one aggregate volume-conservation growth per strike
+could (and, in an earlier version of this module, did -- concentrating an
+entire strike's displaced volume onto the handful of rays nearest a narrow
+die's edge and, for the overwhelmingly common case of a *reducing* target
+(target below the ray's current radius), snapping them straight to that
+target in a single strike regardless of how small the computed growth was,
+while their immediate neighbours stayed completely unmoved: a visible,
+"triangulated" discontinuity rather than a smooth bulge). ``weight *
+closure_fraction`` is always < 1 for every material this module knows
+about, so a single strike can only ever close *part* of the remaining gap
+-- the shape only reaches its target *exactly* in the limit, after enough
+strikes/cycles, never as an intermediate-frame artifact. This also means
+volume is no longer conserved *exactly* per strike, only approximately --
+the deliberate trade for continuity; the die's own rigid, commanded depth
+is completely unaffected either way.
+
+Each footprint's bulge margin -- the raised-cosine taper's own width -- is
+never allowed to shrink below a fraction of ``stock_radius_mm`` (see
+``_MIN_MARGIN_FRACTION``), so it always stays wide enough for the angular/
+axial sampling grid to actually resolve it as a smooth curve rather than a
+handful of samples that alias into a step (the same discontinuity as above,
+from a different cause: too few samples inside an overly-narrow margin).
+Two further, purely geometric refinements make that bulge behave more like
+real forge-temperature material actually spreads, without ever becoming a
+constitutive/FEM model:
+
+- **Confinement-weighted anisotropy.** A die's own footprint is rarely
+  square: a long, narrow anvil confines material strongly along its length
+  but leaves it relatively free tangentially, while a short, wide anvil does
+  the opposite. Each footprint's own axial-vs-tangential bulge margins (see
+  ``_footprint_bias``) are scaled by that footprint's own aspect ratio, so
+  material genuinely spreads preferentially in whichever direction the die
+  itself is smallest -- not by the same symmetric distance-based falloff
+  regardless of die shape. A square/symmetric footprint reduces exactly to
+  the previous, isotropic margins.
+- **Material/temperature-gated response.** ``lcaf.toolpathing.material``
+  resolves ``material``/``target_temperature_c`` (carried on every
+  operation) to a 0..1 ``formability``, which scales ``reach_scale`` (how
+  far the bulge margins reach -- cold/stiff material bulges tightly against
+  the die; hot/soft material spreads much further) and ``closure_fraction``
+  (how much of the remaining gap to target closes per strike, in the
+  relaxation formula above). The die's own rigid, commanded depth always
+  applies in full and immediately -- only the secondary bulge redistribution
+  is gated -- so cold, unworkable material genuinely takes more strikes/
+  cycles to fully spread onto the target, the same way real forging
+  practice needs more hits for less workable material, while the shape
+  still converges exactly given enough cycles (``find_sufficient_cycles``
+  warns rather than silently failing if it does not, within
+  ``max_cycles``).
+
 Because the default ``upper_die_radius_mm`` (``stock_radius_mm``) always
 fully covers the target at the exact station it targets, the final shape
-(after every rotation has struck) still converges exactly to the target's
-own support envelope at that default, regardless of the configured anvil
-size -- an explicitly undersized ``upper_die_radius_mm`` is an honest
+(after enough strikes/cycles have run) still converges exactly to the
+target's own support envelope at that default, regardless of the configured
+anvil size -- an explicitly undersized ``upper_die_radius_mm`` is an honest
 exception to this: like a real round punch smaller than a face, it can
 legitimately leave parts of that face unstruck.
 """
@@ -63,6 +111,7 @@ import dataclasses
 import math
 from typing import Sequence
 
+from .material import formability_response, resolve_material_band
 from .toolpath_slicer import (
     MachineLimits,
     Point2,
@@ -71,6 +120,12 @@ from .toolpath_slicer import (
     ToolpathSlicer,
     TriangleMesh,
 )
+
+# The minimum width of a bulge margin's raised-cosine taper, as a fraction of
+# stock_radius_mm -- see the module docstring's discussion of why a margin
+# must never be allowed to shrink below what the angular/axial sampling grid
+# can actually resolve as smooth.
+_MIN_MARGIN_FRACTION = 0.12
 
 
 def die_cap(
@@ -143,6 +198,59 @@ def disc_contact_profile(
     if half_width <= 0.0:
         return None
     return die_contact_profile(2.0 * half_width, 0.0, support_mm, samples)
+
+
+def disc_rim_profile(
+    radius_mm: float,
+    half_length_mm: float,
+    sides: int = 24,
+) -> tuple[Point2, ...]:
+    """Perimeter of the striking disc's true footprint in its own (axial,
+    tangential) plane: a circle of ``radius_mm`` truncated to the strip
+    ``|axial| <= half_length_mm``.
+
+    This is the exact shape ``_apply_strike_3d``'s ``disc_half_width_at``
+    already enforces per station -- tangential half-width
+    ``sqrt(max(0, radius_mm**2 - axial**2))``, zero beyond ``radius_mm`` --
+    just expressed as a rim polygon instead of a per-station formula, so a
+    3D renderer can draw the die's real footprint (a circle flattened by two
+    straight chords where it overhangs the segment, never a uniformly
+    shrunk circle that would misrepresent how far it reaches tangentially)
+    instead of approximating it.
+
+    Returns the full circle when ``radius_mm <= half_length_mm`` (the disc
+    never reaches its own segment boundary).
+    """
+    sides = max(8, sides)
+    if radius_mm <= half_length_mm + 1e-9:
+        return tuple(
+            (radius_mm * math.cos(2.0 * math.pi * index / sides), radius_mm * math.sin(2.0 * math.pi * index / sides))
+            for index in range(sides)
+        )
+
+    half_length_mm = max(0.0, half_length_mm)
+    theta_c = math.acos(min(1.0, half_length_mm / radius_mm))
+    arc_span = math.pi - 2.0 * theta_c
+    chord_half = math.sqrt(max(0.0, radius_mm**2 - half_length_mm**2))
+    if arc_span <= 1e-9:
+        # The clip is so tight the disc barely pokes past it -- a thin
+        # rectangle rather than a degenerate zero-area sliver.
+        return (
+            (half_length_mm, chord_half),
+            (-half_length_mm, chord_half),
+            (-half_length_mm, -chord_half),
+            (half_length_mm, -chord_half),
+        )
+
+    arc_points = max(2, sides // 2)
+    rim: list[Point2] = []
+    for index in range(arc_points + 1):
+        theta = theta_c + arc_span * index / arc_points
+        rim.append((radius_mm * math.cos(theta), radius_mm * math.sin(theta)))
+    for index in range(arc_points + 1):
+        theta = math.pi + theta_c + arc_span * index / arc_points
+        rim.append((radius_mm * math.cos(theta), radius_mm * math.sin(theta)))
+    return tuple(rim)
 
 
 def anvil_side_support(ring: Sequence[Point2], rotation_deg: float) -> float:
@@ -231,9 +339,14 @@ def material_state(
             else 1e-6
         )
         center_x = station_x[int(metadata["segment_index"])]
+        material = metadata.get("material", "steel")
+        temperature_c = float(operation.get("target_temperature", 0.0))
+        band = resolve_material_band(material, temperature_c)
+        response = formability_response(band.formability)
         radii_grid = _apply_strike_3d(
             radii_grid, angles, station_x, center_x, axial_half_length, disc_axial_half_length,
             rotation, support, stock_radius, width, corner_radius, target_radii_grid, upper_die_radius,
+            response.reach_scale, response.closure_fraction,
         )
 
     return tuple(
@@ -325,6 +438,8 @@ def _apply_strike_3d(
     corner_radius_mm: float,
     target_radii_grid: Sequence[Sequence[float]],
     upper_die_radius_mm: float,
+    reach_scale: float,
+    closure_fraction: float,
 ) -> list[list[float]]:
     """Clip the whole station-by-angle grid by one die strike.
 
@@ -351,26 +466,49 @@ def _apply_strike_3d(
       holding material at ``stock_radius_mm`` (it never reduces anything,
       only prevents bulging past the original surface).
 
-    Volume either footprint displaces is conserved by bulging the samples
-    immediately adjacent to it -- both axially and tangentially -- fading
-    to zero within a couple of footprint dimensions of its edge, capped so
-    that bulge growth never pushes material past the target's own boundary
-    in that exact direction, since a rotation whose strike does not itself
-    cover that direction will never bring an overshoot there back down
-    again. The two footprints can never collide with each other -- the
-    striking side only ever touches rays with ``sin(theta + rotation_rad) >
-    0``, the anvil side only rays with ``sin(theta + rotation_rad) < 0`` --
-    so they safely share one closed-form volume-conservation solve per
-    strike.
+    Material either footprint displaces is not deleted: it relaxes smoothly,
+    immediately adjacent to it -- both axially and tangentially -- toward
+    the target's own known boundary in that exact direction, via the bounded
+    relaxation described in the module docstring, fading to zero within a
+    margin of the footprint's own edge. That relaxation never pushes
+    material past the target's own boundary in that exact direction (it is
+    a bounded blend toward it, never an overshoot), since a rotation whose
+    strike does not itself cover that direction will never bring an
+    overshoot there back down again. The two footprints can never collide
+    with each other -- the striking side only ever touches rays with
+    ``sin(theta + rotation_rad) > 0``, the anvil side only rays with
+    ``sin(theta + rotation_rad) < 0``.
+
+    ``reach_scale`` and ``closure_fraction`` (see
+    ``lcaf.toolpathing.material.formability_response``) do not touch either
+    footprint's *rigid* shape or reach -- only the bulge margins (via
+    ``_footprint_bias``, confinement-weighted by each footprint's own
+    axial/tangential aspect ratio) and how much of the remaining gap to
+    target closes this strike. Both default to values that reduce exactly
+    to the previous isotropic behaviour (``reach_scale=1``), and
+    ``closure_fraction=1`` collapses the relaxation to "snap fully to
+    target wherever touched" -- never used in practice since no material
+    band reaches a formability of exactly 1.
     """
     station_count = len(radii_grid)
     segment_count = len(angles)
     new_grid = [list(row) for row in radii_grid]
 
+    # The raised-cosine bulge margins below must stay wide enough for the
+    # angular/axial sampling grid to actually resolve them as a smooth taper:
+    # an aspect-ratio bias and/or a low reach_scale can otherwise shrink a
+    # margin to a fraction of a millimetre, at which point only one or two
+    # samples fall inside it and the "smooth" cosine collapses into a hard
+    # step between neighbouring rays -- a discontinuous, "triangulated" jump
+    # in the rendered cross-section rather than a bulge.
+    margin_floor_mm = max(stock_radius_mm * _MIN_MARGIN_FRACTION, 1e-6)
+
     half_width_anvil = width_mm / 2.0
-    influence_margin_anvil_mm = 2.0 * half_width_anvil
-    axial_margin_mm = max(2.0 * axial_half_length, 1e-9)
-    disc_axial_margin_mm = max(2.0 * disc_axial_half_length, 1e-9)
+    anvil_axial_bias, anvil_tangential_bias = _footprint_bias(2.0 * axial_half_length, width_mm)
+    influence_margin_anvil_mm = max(2.0 * half_width_anvil * (2.0 * anvil_tangential_bias) * reach_scale, margin_floor_mm)
+    axial_margin_mm = max(2.0 * axial_half_length * (2.0 * anvil_axial_bias) * reach_scale, margin_floor_mm)
+    disc_axial_bias, disc_tangential_bias = _footprint_bias(2.0 * disc_axial_half_length, 2.0 * upper_die_radius_mm)
+    disc_axial_margin_mm = max(2.0 * disc_axial_half_length * (2.0 * disc_axial_bias) * reach_scale, margin_floor_mm)
 
     def disc_half_width_at(axial_offset: float) -> float:
         return math.sqrt(max(0.0, upper_die_radius_mm**2 - axial_offset**2))
@@ -430,20 +568,11 @@ def _apply_strike_3d(
     if not touched_stations:
         return new_grid
 
-    original_volume = sum(
-        _trapezoid_weight(station_x, station) * _star_polygon_area(radii_grid[station], angles)
-        for station in touched_stations
-    )
-    clipped_volume = sum(
-        _trapezoid_weight(station_x, station) * _star_polygon_area(new_grid[station], angles)
-        for station in touched_stations
-    )
-    if clipped_volume >= original_volume - 1e-9:
-        return new_grid
-
-    weights = {station: [0.0] * segment_count for station in touched_stations}
-
-    # Disc bulge weights: axial x tangential fade, symmetric to the anvil's.
+    # Disc bulge: relax each untouched ray on the striking side smoothly
+    # toward its own known target, weighted by an axial x tangential
+    # raised-cosine fade -- applied immediately and directly (no aggregate
+    # volume solve), since this pass and the anvil pass below can never
+    # touch the same ray (they occupy opposite hemispheres of sin(delta)).
     for station in touched_stations:
         axial_offset = abs(station_x[station] - center_x)
         axial_beyond = max(0.0, axial_offset - disc_axial_half_length)
@@ -454,10 +583,10 @@ def _apply_strike_3d(
             else 0.5 * (1.0 + math.cos(math.pi * axial_beyond / disc_axial_margin_mm))
         )
         half_width = disc_half_width_at(min(axial_offset, disc_axial_half_length))
-        influence_margin_disc_mm = max(2.0 * half_width, 1e-9)
+        influence_margin_disc_mm = max(2.0 * half_width * (2.0 * disc_tangential_bias) * reach_scale, margin_floor_mm)
         footprint_row = in_footprint[station]
         row = new_grid[station]
-        station_weights = weights[station]
+        target_row = target_radii_grid[station]
         for index, theta in enumerate(angles):
             if footprint_row[index]:
                 continue
@@ -472,9 +601,12 @@ def _apply_strike_3d(
                 tangential_factor = 0.5 * (1.0 + math.cos(math.pi * tangential_beyond / influence_margin_disc_mm))
             else:
                 continue
-            station_weights[index] = axial_factor * tangential_factor
+            weight = axial_factor * tangential_factor
+            if weight > 0.0:
+                current = row[index]
+                row[index] = current + weight * closure_fraction * (target_row[index] - current)
 
-    # Anvil bulge weights: separable axial x tangential fade -- unchanged.
+    # Anvil bulge: the same bounded relaxation, on the anvil's hemisphere.
     for station in touched_stations:
         axial_offset = abs(station_x[station] - center_x)
         axial_beyond = max(0.0, axial_offset - axial_half_length)
@@ -486,7 +618,7 @@ def _apply_strike_3d(
         )
         footprint_row = in_footprint[station]
         row = new_grid[station]
-        station_weights = weights[station]
+        target_row = target_radii_grid[station]
         for index, theta in enumerate(angles):
             if footprint_row[index]:
                 continue
@@ -501,43 +633,30 @@ def _apply_strike_3d(
                 tangential_factor = 0.5 * (1.0 + math.cos(math.pi * tangential_beyond / influence_margin_anvil_mm))
             else:
                 continue
-            station_weights[index] = axial_factor * tangential_factor
+            weight = axial_factor * tangential_factor
+            if weight > 0.0:
+                current = row[index]
+                row[index] = current + weight * closure_fraction * (target_row[index] - current)
 
-    sin_delta = math.sin(angles[1] - angles[0]) if segment_count > 1 else 0.0
-    if abs(sin_delta) < 1e-12:
-        return new_grid
-
-    quadratic_term = linear_term = constant_term = 0.0
-    for station in touched_stations:
-        weight = _trapezoid_weight(station_x, station)
-        a2, a1, a0 = _area_coefficients(new_grid[station], weights[station])
-        quadratic_term += weight * a2
-        linear_term += weight * a1
-        constant_term += weight * a0
-
-    target = 2.0 * original_volume / sin_delta
-    growth = _solve_growth_for_target(quadratic_term, linear_term, constant_term, target)
-    if growth is not None and growth > 0.0:
-        for station in touched_stations:
-            row = new_grid[station]
-            station_weights = weights[station]
-            target_row = target_radii_grid[station]
-            for index in range(segment_count):
-                if station_weights[index] > 0.0:
-                    row[index] = min(row[index] * (1.0 + station_weights[index] * growth), target_row[index])
     return new_grid
 
 
-def _trapezoid_weight(station_x: Sequence[float], index: int) -> float:
-    """The trapezoidal-rule axial length one station's cross-section represents."""
-    count = len(station_x)
-    if count < 2:
-        return 1.0
-    if index == 0:
-        return 0.5 * (station_x[1] - station_x[0])
-    if index == count - 1:
-        return 0.5 * (station_x[-1] - station_x[-2])
-    return 0.5 * (station_x[index + 1] - station_x[index - 1])
+def _footprint_bias(axial_extent_mm: float, tangential_extent_mm: float) -> tuple[float, float]:
+    """Confinement-weighted axial/tangential bias from one footprint's own aspect ratio.
+
+    Material spreads preferentially toward whichever direction the die
+    itself is smaller in -- the direction it confines least -- rather than
+    with the same isotropic reach regardless of die shape: a long, narrow
+    footprint is biased toward tangential spread, a short, wide one toward
+    axial spread. Returns ``(axial_bias, tangential_bias)``, each in (0, 1)
+    and summing to 1; a square footprint (equal extents) returns
+    ``(0.5, 0.5)`` which, multiplied by 2 where it is used, reduces exactly
+    to the previous isotropic margins.
+    """
+    axial_extent_mm = max(axial_extent_mm, 1e-9)
+    tangential_extent_mm = max(tangential_extent_mm, 1e-9)
+    total = axial_extent_mm + tangential_extent_mm
+    return tangential_extent_mm / total, axial_extent_mm / total
 
 
 def _die_clip_radius(
@@ -576,61 +695,6 @@ def _die_clip_radius(
         else:
             low = mid
     return high
-
-
-def _star_polygon_area(radii: Sequence[float], angles: Sequence[float]) -> float:
-    """Shoelace area of the polygon traced by ``radii`` at evenly spaced ``angles``."""
-    count = len(radii)
-    total = 0.0
-    for index in range(count):
-        next_index = (index + 1) % count
-        total += radii[index] * radii[next_index] * math.sin(angles[next_index] - angles[index])
-    return abs(total) * 0.5
-
-
-def _area_coefficients(
-    radii: Sequence[float],
-    weights: Sequence[float],
-) -> tuple[float, float, float]:
-    """Coefficients of one station's area as a quadratic in the shared growth ``u``.
-
-    Scaling ray ``i`` by ``1 + weights[i] * u`` makes the area a quadratic in
-    ``u``; returns ``(quadratic_term, linear_term, constant_term)`` such that
-    ``area(u) = 0.5 * sin(angle_step) * (quadratic_term*u**2 + linear_term*u + constant_term)``.
-    """
-    count = len(radii)
-    quadratic_term = linear_term = constant_term = 0.0
-    for index in range(count):
-        next_index = (index + 1) % count
-        product = radii[index] * radii[next_index]
-        weight_a, weight_b = weights[index], weights[next_index]
-        constant_term += product
-        linear_term += product * (weight_a + weight_b)
-        quadratic_term += product * weight_a * weight_b
-    return quadratic_term, linear_term, constant_term
-
-
-def _solve_growth_for_target(
-    quadratic_term: float,
-    linear_term: float,
-    constant_term: float,
-    target: float,
-) -> float | None:
-    """Solve ``quadratic_term*u**2 + linear_term*u + constant_term == target`` for the smallest positive ``u``.
-
-    This has a closed-form solution -- no iteration needed.
-    """
-    if quadratic_term <= 1e-12:
-        if abs(linear_term) <= 1e-12:
-            return None
-        growth = (target - constant_term) / linear_term
-        return growth if growth > 0 else None
-
-    discriminant = linear_term**2 - 4.0 * quadratic_term * (constant_term - target)
-    if discriminant < 0:
-        return None
-    growth = (-linear_term + math.sqrt(discriminant)) / (2.0 * quadratic_term)
-    return growth if growth > 0 else None
 
 
 def radial_resample(polygon: Sequence[Point2], radial_segments: int = 48) -> tuple[Point2, ...]:

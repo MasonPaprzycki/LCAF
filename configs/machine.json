@@ -2,12 +2,12 @@
     "machine_name": "LCAF_Forge",
     "axis_config_path": "axis.jsonl",
 
-    "linear_units": "mm",
+    "linear_units": "inch",
     "angular_units": "degree",
 
-    "default_linear_velocity_mm_s": 10.0,
-    "max_linear_velocity_mm_s": 25.0,
-    "max_linear_acceleration_mm_s2": 400.0,
+    "default_linear_velocity_in_s": 0.393701,
+    "max_linear_velocity_in_s": 0.984252,
+    "max_linear_acceleration_in_s2": 15.748031,
 
     "default_angular_velocity_deg_s": 10.0,
     "max_angular_velocity_deg_s": 45.0,
@@ -19,5 +19,12 @@
     "mesa_board_driver": "hm2_eth",
     "mesa_board_config": "board_ip=\"192.168.1.121\" config=\"num_encoders=1 num_pwmgens=0 num_stepgens=5\"",
 
-    "watchdog_timeout_ns": 5000000
+    "watchdog_timeout_ns": 5000000,
+
+    "use_linuxcnc_native_processes": false,
+
+    "linear_ferror_in": 0.03937008,
+    "linear_min_ferror_in": 0.00984252,
+    "angular_ferror_deg": 1.0,
+    "angular_min_ferror_deg": 0.25
 }

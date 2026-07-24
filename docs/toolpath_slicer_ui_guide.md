@@ -54,14 +54,15 @@ the segment, die position, rotary orientation, and multi-strike pass count.
 
 Select the **3D view** tab to switch to an interactive playback of the same
 animation, where the lower die renders as a real, finite rectangular block
-and the upper die renders as a real, sized circular disc -- not infinitely
-thin sheets or unbounded planes -- so both dies' true, engine-confined extent
-is what you see: the disc's own axial thickness matches exactly the one
-segment the engine confines that strike to, not an arbitrarily generous
-size. If the disc's true radius is wider than the segment it strikes, it is
-drawn genuinely clipped by that segment boundary (an ellipse along X, at
-full radius tangentially) rather than visually overshooting into
-neighbouring segments the engine never lets it touch. Three mode buttons in
+and the upper die renders as a real, full-size circular disc, at its
+correctly scaled `upper_die_radius_mm` -- not infinitely thin sheets or
+unbounded planes, and never flattened, chopped, or shrunk to reflect how far
+that one strike's own rigid contact mechanics is confined. The die is
+always rendered as the true, physical tool it represents; the rigid contact
+computation's own confinement to the one segment a strike targets (see
+[toolpath_slicer.md](toolpath_slicer.md#die-geometry)) is a modelling choice
+about how far this one strike's commanded depth is trusted to apply, not a
+claim about the tool's actual size or shape. Three mode buttons in
 the top-left corner control what dragging does:
 
 - **Rotate**: spins the whole view about the fixed axis pointing into the
@@ -87,6 +88,16 @@ to exactly the one segment it targets -- nothing deforms in a segment a
 visible die isn't touching unless you explicitly set a `die_length_mm` that
 reaches further (its bulge margin can still nudge the immediately adjacent
 segment toward, but never past, that segment's own eventual target).
+
+Select the **Force estimate** tab to see a separate, independent estimate of
+the forging force each strike needs, computed from the chosen material/
+temperature and the strike's own die contact geometry -- a standard
+slab-method (friction-hill) hand calculation, not a simulation. It never
+feeds back into the deformation preview or the planned coordinates: dies
+are treated as rigid and able to supply whatever force is shown. The tab
+reports the current step's estimate (updating live during playback), the
+peak estimate across the whole plan, and a line plot of every step's
+estimate with the current step marked.
 
 ## Choose a target
 
@@ -124,9 +135,12 @@ chooses its largest bounding-box dimension.
   the unformed stock. This is fixture/tooling calibration, not CAD data.
 - **Model scale**: millimetres per OBJ/STL unit; use `25.4` for inch-based
   geometry.
-- **Target temperature (°C) / X centre offset / Y tool position**: fixture
-  coordinates and metadata used directly in the generated controller
-  operations.
+- **Target temperature (°C)**: fixture metadata recorded on every generated
+  operation, and -- together with **Billet material** below -- now also
+  drives the *preview's* deformation mechanics and a separate force
+  estimate. It never changes the planned strike coordinates themselves.
+- **X offset from clamp (mm) / Y tool position**: fixture coordinates used
+  directly in the generated controller operations.
 - **Cycles**: how many times the entire radial-segment x strike sweep
   repeats, end-to-end. Every operation just replays, in order, against one
   running material state, so a second cycle automatically trues up whatever
@@ -140,6 +154,16 @@ chooses its largest bounding-box dimension.
   whichever end you pick here, regardless of how the source mesh was
   authored -- see the axis convention in
   [toolpath_slicer.md](toolpath_slicer.md).
+- **Billet material**: `plasticine`, `aluminum`, or `steel`. Together with
+  **Target temperature**, this drives how convincingly the preview's
+  deformation bulges/settles and how many strikes/cycles it takes to fully
+  converge (cold, stiff material spreads less per strike and needs more
+  hits, exactly like real forging) and the separate estimate on the
+  **Force estimate** tab -- see
+  [Material and temperature](toolpath_slicer.md#material-and-temperature)
+  for the underlying model. A hint under the picker shows a realistic
+  temperature range for the chosen material. Neither setting changes the
+  planned strike coordinates or the target's final geometry.
 
 ## Set the die geometry
 
@@ -147,8 +171,8 @@ Two rigid, finite surfaces act on every strike, matching the machine: the
 **lower die** (the anvil, rectangular) and the **upper die** (the striker, a
 flat-faced circular disc). Leaving any field in **3. Die geometry** blank
 does not mean "unconstrained" -- it means a sensible physical default sized
-from the stock geometry, so the preview conserves volume by visibly bulging
-displaced material sideways by default, without configuring anything first.
+from the stock geometry, so the preview visibly bulges displaced material
+sideways by default, without configuring anything first.
 
 - **Die face shape**: `Full rectangular (sharp edge)` (the previous
   behaviour) or `Radiused edge`, which blends the lower die's tangential
@@ -171,18 +195,43 @@ Within its footprint each die is an impenetrable displacement boundary: the
 lower die holds material at the original stock surface across every segment
 its length reaches, not just the one the strike is nominally "at"; the upper
 die presses material to the commanded strike depth within its own disc,
-rigidly confined to that one segment. Volume either footprint displaces is
-not deleted: it bulges the material immediately adjacent to it -- both
-axially into neighbouring segments and tangentially around neighbouring
-angles -- the way forge-temperature steel spreads out from under a die
-rather than shrinking in volume. That response fades out within a couple of
-footprint dimensions of each die's edge, and is capped so it never
-overshoots past the target's own boundary in that direction (never past a
-neighbouring segment's own eventual value). **At the default upper die
-radius, whatever the lower die is configured to do, once every rotation has
-struck, the final shape always converges exactly to the target** -- the
-lower die's own configuration only shapes how the animation looks partway
-through, never the end result.
+rigidly confined to that one segment. Material either footprint displaces is
+not deleted: it relaxes smoothly toward the material immediately adjacent to
+it -- both axially into neighbouring segments and tangentially around
+neighbouring angles -- the way forge-temperature steel spreads out from
+under a die rather than shrinking in volume. That response fades out
+within a couple of footprint dimensions of each die's edge, and is bounded
+so it never overshoots past the target's own boundary in that direction
+(never past a neighbouring segment's own eventual value). Critically, this
+relaxation is a *gradual, continuous* blend each strike, never an instant
+jump: a ray immediately next to a die's edge and a ray just outside its
+influence never differ by more than a smooth taper between them, so the
+preview never shows the sudden faceted "steps" a one-shot snap-to-target
+would produce.
+
+That bulge is neither the same in every direction nor applied all at once
+regardless of material: each die's own bulge margins are biased by its own
+axial-vs-tangential aspect ratio, so material spreads preferentially in
+whichever direction the die itself is *narrower* (and so less confining)
+in -- a long, narrow anvil favours tangential spread, a short, wide one
+favours axial spread. **Billet material** and **Target temperature**
+additionally scale both how far that bulge reaches and how much of it
+settles per strike, so cold/stiff material genuinely takes more strikes/
+cycles to fully spread onto the target than hot/soft material at the same
+die settings. See
+[Material and temperature](toolpath_slicer.md#material-and-temperature) for
+the full model.
+
+**At the default upper die radius, whatever the lower die is configured to
+do, once enough rotations/cycles have struck, the final shape still
+converges exactly to the target** -- the lower die's own configuration, and
+the chosen material/temperature, only shape how the animation looks and how
+many cycles it takes, never the eventual result. **Complete necessary
+cycles automatically** keeps adding cycles until it does, and reports (as a
+warning) if it still cannot within its own cycle cap -- a cold, stiff
+material/temperature choice can legitimately need many more cycles than a
+hot one for the same die geometry, the same way real forging needs more
+hits for less workable material.
 
 Below the geometry fields, a line reports the target's own volume and the
 **recommended stock length**: how long a cylinder of the chosen stock radius
@@ -202,8 +251,10 @@ radius even when its four faces all fit, since only those four discrete
 rotations are actually struck. Correct the setup or fixture (usually a
 larger stock radius) instead of looking for an override.
 
-The current visualisation is a computational-geometry envelope. It does not
-predict material flow, flash, springback, thermal effects, die compliance, or
+The current visualisation is a computational-geometry envelope. Material and
+temperature now shape that geometry more convincingly and drive a separate
+force estimate, but this remains computational geometry, not a simulation: it
+does not predict true material flow, flash, springback, die compliance, or
 collisions. Treat its animation as a toolpath review aid. Review the JSONL,
 prove it off-material, and use normal ForgeBrain/LinuxCNC safety procedures
 before any physical motion.
@@ -212,9 +263,13 @@ before any physical motion.
 
 After reviewing the entire animation, select **Export JSONL** and choose a
 file. Each line is one ForgeBrain `ToolpathOperation`. The metadata records the
-source segment, cycle, target support, strike pass, and the die geometry
-(lower die width, length, corner radius, shape; upper die radius) used for
-that strike.
+source segment, cycle, target support, strike pass, the die geometry
+(lower die width, length, corner radius, shape; upper die radius), and the
+chosen material used for that strike -- purely informational: the machine-
+facing fields (`x`, `y`, `die_gap`, `rotation`, `target_temperature`) are
+unaffected by material and are all `ForgeBrain.load_jsonl()` actually reads.
+The separate force estimate is never written into this file; read it from
+the **Force estimate** tab, or from the CLI's own printed peak-force line.
 
 For the controller semantics and CLI usage, see
 [toolpath_slicer.md](toolpath_slicer.md). For the supplied geometries, see
