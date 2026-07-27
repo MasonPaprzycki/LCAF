@@ -236,6 +236,10 @@ need to convert a toolpath file to inches.
    ```
    python -c "from lcaf.utils.joint_configuration import load_machine_configuration, write_config_files; write_config_files(load_machine_configuration('configs/machine.json'), 'configs/generated')"
    ```
+   This also creates an empty `configs/generated/tool.tbl` the first time
+   (LinuxCNC's `iocontrol` requires this file to exist even though this
+   project has no tool changer -- see `software_setup.md` section 5). It is
+   never overwritten on later regenerations.
 5. Start LinuxCNC against the generated INI:
    `linuxcnc configs/generated/LCAF_Forge.ini`.
 6. In a second terminal, confirm the board came up and pins exist:

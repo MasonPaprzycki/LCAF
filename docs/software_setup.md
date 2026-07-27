@@ -63,6 +63,21 @@ If the Pi is offline, clone or download the repo on another machine and
 copy the folder over with `scp -r LCAF pi@<pi-ip>:~/` or a USB drive
 instead.
 
+**Optional shortcut:** `scripts/setup_pi.sh` automates everything in
+sections 2, 4, and the config-regeneration half of section 5 -- it checks
+the `linuxcnc`/`hal` import and `git`, installs `python3-tk` if missing,
+adds the `PYTHONPATH` export to `~/.bashrc`, and regenerates
+`configs/generated/*` (including `tool.tbl`, see section 5 below). Run it
+once after cloning:
+
+```
+bash ~/LCAF/scripts/setup_pi.sh
+```
+
+It deliberately does not start LinuxCNC or the control process -- read
+sections 4-5 below regardless, since those two steps still need to be run
+by hand, in their own terminals, and watched live the first time.
+
 ## 4. Python environment
 
 **Do not create an isolated virtual environment with `python3 -m venv`
@@ -116,9 +131,17 @@ python3 -c "from lcaf.utils.joint_configuration import load_machine_configuratio
 
 You should see no output and get your shell prompt back immediately (this
 only renders text files -- it never touches `linuxcnc`/`hal`). Check
-`configs/generated/LCAF_Forge.hal` and `.ini` now exist. A traceback here
-means a problem in `configs/machine.json`/`axis.jsonl` themselves (fix the
-config, not the generator).
+`configs/generated/LCAF_Forge.hal`, `.ini`, and `tool.tbl` now exist. A
+traceback here means a problem in `configs/machine.json`/`axis.jsonl`
+themselves (fix the config, not the generator).
+
+`tool.tbl` is a minimal, empty LinuxCNC tool table -- LCAF has no tool
+changer or tool-number logic anywhere in `lcaf.control`, but LinuxCNC's
+`iocontrol` refuses to start at all (`iocontrol.cc: can't load tool table`)
+if the file its INI's `[EMCIO]TOOL_TABLE` points at doesn't exist, even
+though nothing in this project ever reads or writes tool entries in it. It
+is created once and never overwritten by later regenerations, so it's safe
+to leave alone.
 
 ```
 # Terminal 1: start LinuxCNC itself against the generated INI.
