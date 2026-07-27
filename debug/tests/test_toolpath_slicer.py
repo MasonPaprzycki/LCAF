@@ -279,7 +279,7 @@ class ToolpathSlicerTests(unittest.TestCase):
                 load_mesh(path)
 
     def test_all_shipped_obj_examples_generate_a_demo_plan(self) -> None:
-        examples = Path(__file__).resolve().parents[1] / "examples"
+        examples = Path(__file__).resolve().parents[2] / "examples"
         for filename in (
             "square_bar.obj",
             "hex_bar.obj",
@@ -314,7 +314,7 @@ class ToolpathSlicerTests(unittest.TestCase):
         # bulge off in some other direction. Checked across every shipped
         # example (constant and tapered profiles) and both an unconfigured
         # and a finite, narrow anvil.
-        examples = Path(__file__).resolve().parents[1] / "examples"
+        examples = Path(__file__).resolve().parents[2] / "examples"
         cases = (
             ("square_bar.obj", 4, 10),
             ("hex_bar.obj", 6, 10),
@@ -850,7 +850,7 @@ class ToolpathSlicerTests(unittest.TestCase):
         self.assertLessEqual(two_cycles, one_cycle + 1e-9)
 
     def test_find_sufficient_cycles_converges_and_reports_it_in_metadata(self) -> None:
-        mesh = load_mesh(Path(__file__).resolve().parents[1] / "examples" / "square_bar.obj")
+        mesh = load_mesh(Path(__file__).resolve().parents[2] / "examples" / "square_bar.obj")
         settings = SliceSettings(
             stock_radius_mm=12,
             radial_segments=4,
@@ -867,7 +867,7 @@ class ToolpathSlicerTests(unittest.TestCase):
         self.assertFalse(any("max_cycles" in warning for warning in plan.warnings))
 
     def test_find_sufficient_cycles_warns_when_it_cannot_converge(self) -> None:
-        mesh = load_mesh(Path(__file__).resolve().parents[1] / "examples" / "square_bar.obj")
+        mesh = load_mesh(Path(__file__).resolve().parents[2] / "examples" / "square_bar.obj")
         # An upper die far too small to ever flatten the whole face, capped
         # at very few cycles: this must not loop forever, and must report
         # that it gave up rather than silently returning a bad plan.

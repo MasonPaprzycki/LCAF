@@ -50,6 +50,29 @@ class Axis:
                 "(following error tripped -- see docs/potential_issues.md)."
             )
 
+        # HOMING is excluded: software homing deliberately drives this joint
+        # onto its own limit switch to find it (see
+        # LinuxCNCAxialInterface._jog_toward_limit_switch), so
+        # is_on_hard_limit() reading True during that phase is expected, not
+        # a fault. Anywhere else, LinuxCNC reporting this joint on a hard
+        # limit means every joint's enable output has just been disabled
+        # machine-wide (see docs/hardware_setup.md) -- a different condition
+        # from is_faulted() above (that only reflects following error, never
+        # a hard-limit trip), so without this check it would go completely
+        # unnoticed here.
+        if (
+            self.status.state not in (AxisState.FAULT, AxisState.HOMING)
+            and self.axial_interface.is_on_hard_limit()
+        ):
+            self.status.fault = True
+            self.status.state = AxisState.FAULT
+            self.logger.error(
+                f"{self.axis}: hard limit switch tripped outside of homing -- LinuxCNC has "
+                "disabled every joint's enable output machine-wide and requires "
+                "override_limits()+re-enable+re-home to recover (see docs/hardware_setup.md; "
+                "no automated recovery path exists yet -- see docs/potential_issues.md)."
+            )
+
         if self.status.state == AxisState.FAULT:
             return # do not continue state machine if fault is detected
 

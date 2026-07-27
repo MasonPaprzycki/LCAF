@@ -219,6 +219,18 @@ class JointConfiguration:
                 "(travel always starts at 0 -- see the max_travel docstring)."
             )
 
+        if (
+            self.negative_limit_input is not None
+            and self.positive_limit_input is not None
+            and self.negative_limit_input == self.positive_limit_input
+        ):
+            raise ValueError(
+                f"Joint {self.joint} ({self.axis}): negative_limit_input and "
+                f"positive_limit_input are both '{self.negative_limit_input}' -- they must be "
+                "wired to different physical inputs, or homing/limit checks cannot tell which "
+                "end of travel was reached."
+            )
+
         self.steps_per_unit = (
             self.motor_steps_per_revolution
             * self.microsteps

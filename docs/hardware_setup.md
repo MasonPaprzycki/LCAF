@@ -118,7 +118,51 @@ Use the table in section 1 for which TB6 pin is which joint's negative/
 positive input. If your switches are wired the opposite way (normally
 open, or you can't rewire them), set `invert_negative_limit` /
 `invert_positive_limit` for that joint in `axis.jsonl` instead of
-rewiring.
+rewiring. The two switches on a joint must be different physical inputs --
+`JointConfiguration` refuses to load an `axis.jsonl` that wires
+`negative_limit_input` and `positive_limit_input` to the same pin, since
+there would be no way to tell which end of travel was actually reached.
+
+### What a tripped limit switch actually does
+
+Each switch is wired straight into LinuxCNC's own hard-limit input for that
+joint (`joint.N.neg-lim-sw-in` / `joint.N.pos-lim-sw-in` -- section 1's
+table, `JointConfiguration.negative_limit_hal_pin`/`positive_limit_hal_pin`).
+**This is not a per-direction soft stop.** LinuxCNC treats either switch
+tripping as "this should never happen in normal operation" and reacts by
+disabling every joint's enable output machine-wide (reporting `"joint N on
+limit switch error"`), not just inhibiting further travel on the one
+joint/direction that hit it. Recovering requires
+`linuxcnc.command().override_limits()` (or the Axis GUI's "Override
+Limits" checkbox) plus turning the machine back on and jogging off the
+switch -- and this project should be re-homed after any such event anyway,
+per the open-loop-steppers point in `docs/potential_issues.md`.
+
+This condition does **not** set `status.joint[n]['fault']` -- LinuxCNC's
+Python interface documents that field as "axis amp fault" only (following
+error here, see `LinuxCNCAxialInterface.is_faulted()`), so a hard-limit
+trip is otherwise invisible to this project. `Axis.poll()` checks
+`LinuxCNCAxialInterface.is_on_hard_limit()`
+(`status.joint[n]['min_hard_limit']`/`['max_hard_limit']`) separately for
+exactly this reason, and moves the axis to `FAULT` -- except while that
+axis's own state is `HOMING`, since driving onto the switch it's searching
+for is expected there, not a fault (see section 7).
+
+If what you actually want is "block further travel past the negative
+switch but still allow positive travel, and vice versa," that already
+happens for ordinary point-to-point moves through each joint's *soft*
+limits (`[JOINT_n] MIN_LIMIT`/`MAX_LIMIT` in the generated INI, derived
+from `max_travel`) plus `Axis.move()`'s own `is_position_in_range()` check
+before it ever issues a move. The hard switches are a last-resort backstop
+behind that, not the primary mechanism -- deliberately, because these are
+open-loop steppers with no position feedback (`docs/potential_issues.md`),
+so a switch tripping outside homing likely means steps were already missed
+and something is already wrong, which is exactly when a full machine-wide
+stop is the safer reaction.
+
+Homing is the one deliberate exception to all of this -- section 7 covers
+how it avoids tripping this same fault while intentionally driving into
+the switch it's searching for.
 
 ### Enable outputs (TB6)
 
@@ -146,13 +190,32 @@ slip rings needs it), so unlike X/Y/Z its travel is symmetric:
   switchless A joint). LinuxCNC's own native homing sequence never runs.
   Because LinuxCNC would otherwise never see any joint as "homed" and would
   refuse every subsequent move, `generate_ini()` sets
-  `[TRAJ]NO_FORCE_HOMING = 1` automatically in this mode.
+  `[TRAJ]NO_FORCE_HOMING = 1` automatically in this mode. The switch it
+  jogs into is also wired into LinuxCNC's own hard-limit fault pin (see
+  section 5), and LinuxCNC only exempts *its own* native homing state
+  machine from that fault -- a plain jog never qualifies. So before each
+  deliberate seek-jog, `LinuxCNCAxialInterface._jog_toward_limit_switch()`
+  calls `command.override_limits()` first (the same mechanism behind the
+  Axis GUI's "Override Limits" checkbox), and `poll_homing()` calls it
+  again on every heartbeat for as long as that seek is still in progress
+  (LinuxCNC clears an override once the joint next reports "in position,"
+  and there's no clean signal from here for exactly when a jog leaves that
+  state, so this re-arms it defensively rather than risk it lapsing right
+  before the switch trips); without it, the instant the switch trips,
+  LinuxCNC would disable the whole machine before this project's own
+  polling loop ever got a chance to react and stop the jog. See
+  `debug/tests/test_linuxcnc_interface.py` for this behavior under a stubbed
+  `linuxcnc`/`hal` (the real modules only exist on the Pi target -- section
+  12 below).
 - **`true`.** LinuxCNC's own native homing sequence runs instead
   (`command.home(joint)`), using the same limit switches -- `generate_hal()`
   wires each switched joint's negative-limit input to LinuxCNC's
   `home-sw-in` pin too, and `generate_ini()` fills in real
-  `HOME_SEARCH_VEL`/`HOME_LATCH_VEL`/`HOME_SEQUENCE` values. Nothing else
-  in `axis.jsonl` needs to change to switch modes.
+  `HOME_SEARCH_VEL`/`HOME_LATCH_VEL`/`HOME_SEQUENCE` values, including
+  `HOME_IGNORE_LIMITS = YES`. Nothing else in `axis.jsonl` needs to change
+  to switch modes. This mode never needs `override_limits()` -- LinuxCNC's
+  own homing state machine is already exempt from the hard-limit fault
+  while it's running.
 
 Either way, machine coordinate 0 on X/Y/Z is wherever the negative limit
 switch is, and the machine always requires a fresh `home_all()` every
@@ -173,7 +236,7 @@ motor, set these:
 | `max_velocity`, `max_acceleration` | Joint's top speed/acceleration: in/s and in/s² for X/Y/Z, deg/s and deg/s² for A. |
 | `mesa_stepgen` | Which stepgen drives this joint -- see section 1's table. |
 | `enable_output` | Field output wired to the driver's enable input -- see section 1's table. |
-| `negative_limit_input` / `positive_limit_input` | Field inputs wired to the limit switches -- see section 1's table. `null` for A. |
+| `negative_limit_input` / `positive_limit_input` | Field inputs wired to the limit switches -- see section 1's table. `null` for A. Must differ from each other when both are set -- rejected at load time otherwise (section 5). |
 | `is_angular` | `true` for A only. |
 | `has_limit_switches` | `false` for A only -- see section 6. |
 | `inverted` | `true` if the joint moves the wrong physical direction. Flips the motor's direction in software; the normal fix for a reversed motor/lead, cheaper than re-wiring. |

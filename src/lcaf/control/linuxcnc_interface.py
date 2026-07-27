@@ -236,6 +236,35 @@ class LinuxCNCAxialInterface:
         self.poll()
         return bool(self.status.joint[self.joint.joint]["fault"])
 
+    def is_on_hard_limit(self):
+        """
+        True if LinuxCNC currently reports this joint on its negative or
+        positive hard limit (status.joint[n]['min_hard_limit']/
+        ['max_hard_limit'] -- LinuxCNC's own live read of the same
+        neg-lim-sw-in/pos-lim-sw-in pin min_limit_active()/max_limit_active()
+        poll, not a latched fault flag).
+
+        This is a *different* signal from is_faulted(): that only reflects
+        status.joint[n]['fault'], which LinuxCNC's Python interface
+        documents as "axis amp fault" (FERROR/MIN_FERROR here -- see
+        is_faulted()'s docstring) and does not change when a hard limit
+        trips. A hard-limit trip instead disables this joint's (and every
+        other joint's) amp-enable-out machine-wide without ever touching
+        'fault' -- see docs/hardware_setup.md "What a tripped limit switch
+        actually does". Without checking this separately, that condition is
+        invisible to this project: nothing else here would report it as a
+        fault, and the axis would just sit disabled indefinitely.
+
+        Expected to read True for exactly the joint/direction being
+        deliberately sought during software homing (_jog_toward_limit_switch
+        overrides the fault itself, but this status field still reflects the
+        live switch state) -- callers should only treat this as a fault
+        outside of homing. See Axis.poll().
+        """
+        self.poll()
+        joint = self.status.joint[self.joint.joint]
+        return bool(joint["min_hard_limit"]) or bool(joint["max_hard_limit"])
+
     def is_position_in_range(self, position_machine_units: float | None = None) -> bool:
         """
         True if position_machine_units (millimetres for a linear joint,
@@ -341,10 +370,19 @@ class LinuxCNCAxialInterface:
             return False
 
         if self._homing_phase == "software_seek_min":
+            # Re-armed every heartbeat, not just once in _jog_toward_limit_switch():
+            # LinuxCNC clears an override as soon as the joint next reports
+            # "in position" (see override_limits() docstring), and this
+            # project has no way to confirm from here exactly when the jog
+            # actually leaves that state. Calling it again here is a no-op
+            # if it's already armed, and guarantees it's still armed at the
+            # instant min_limit_active() actually goes true below.
+            self.command.override_limits()
+
             if self.min_limit_active():
                 self.soft_stop()
                 self.position_offset_to_native = self.get_linuxcnc_native_position()
-                self.jog_positive(self._homing_speed)
+                self._jog_toward_limit_switch(positive=True)
                 self._homing_phase = "software_seek_max"
                 self._homing_start_time = time.monotonic()
                 return False
@@ -357,6 +395,9 @@ class LinuxCNCAxialInterface:
             return False
 
         if self._homing_phase == "software_seek_max":
+            # See the matching comment in the software_seek_min branch above.
+            self.command.override_limits()
+
             if self.max_limit_active():
                 self.soft_stop()
                 self._set_homed_limits(measured_max_native=self.get_position())
@@ -401,10 +442,10 @@ class LinuxCNCAxialInterface:
 
         if self.min_limit_active():
             self.position_offset_to_native = self.get_linuxcnc_native_position()
-            self.jog_positive(self._homing_speed)
+            self._jog_toward_limit_switch(positive=True)
             self._homing_phase = "software_seek_max"
         else:
-            self.jog_negative(self._homing_speed)
+            self._jog_toward_limit_switch(positive=False)
             self._homing_phase = "software_seek_min"
 
     def _set_homed_limits(self, measured_max_native: float | None = None):
@@ -467,6 +508,40 @@ class LinuxCNCAxialInterface:
         self.command.mode(linuxcnc.MODE_MANUAL)
         self.command.wait_complete()
         self.command.jog(linuxcnc.JOG_CONTINUOUS, True, self.joint.joint, -speed)
+
+    def _jog_toward_limit_switch(self, positive: bool):
+        """
+        Jog deliberately toward a limit switch during software homing
+        (_start_software_homing/poll_homing) -- the only place this project
+        intentionally drives a joint into one.
+
+        The same switch is also wired straight into LinuxCNC's own
+        joint.N.neg-lim-sw-in/pos-lim-sw-in pins (see generate_hal()), which
+        LinuxCNC's motion controller checks every servo cycle independent of
+        this Python process. Normally, tripping one of those pins reports
+        "joint N on limit switch error" and disables every joint's enable
+        output machine-wide (LinuxCNC's intended last-resort crash
+        protection -- see docs/hardware_setup.md). LinuxCNC only *skips*
+        that fault while its own native homing state machine is running
+        (command.home()); software homing here never uses that state
+        machine, it issues plain JOG_CONTINUOUS commands instead. Without
+        this, the instant the switch trips, LinuxCNC would fault the whole
+        machine before poll_homing()'s own poll of min_limit_active()/
+        max_limit_active() ever gets a chance to react and stop the jog.
+
+        command.override_limits() is LinuxCNC's own mechanism for exactly
+        this situation (the same one its "Override Limits" GUI checkbox
+        sends) -- it suppresses the hard-limit fault machine-wide until this
+        joint is back in position (i.e. until soft_stop() brings the jog to
+        a stop), at which point LinuxCNC re-arms it automatically. Native
+        homing (use_linuxcnc_native_processes=True) never calls this method,
+        since it doesn't need it -- see start_homing().
+        """
+        self.command.override_limits()
+        if positive:
+            self.jog_positive(self._homing_speed)
+        else:
+            self.jog_negative(self._homing_speed)
 
     def is_idle(self, velocity_tolerance: float = 1e-6):
         self.poll()
