@@ -653,6 +653,7 @@ def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
     emit(f"loadrt motmod base_period_nsec={machine.base_period_ns} servo_period_nsec={machine.servo_period_ns}")
 
     if not simulate:
+        emit("loadrt hostmot2")
         board_line = f"loadrt {machine.mesa_board_driver}"
         if machine.mesa_board_config:
             board_line += f" {machine.mesa_board_config}"

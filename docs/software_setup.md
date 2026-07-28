@@ -180,6 +180,21 @@ check the physical homing behavior in the LinuxCNC GUI directly first
 is at fault. `Ctrl+C` in this terminal stops the control process; LinuxCNC
 itself (terminal 1) keeps running.
 
+If LinuxCNC instead fails to start with `hm2_eth: dlopen: ... undefined
+symbol: hm2_register` and `insmod for hm2_eth failed`, that's not a wiring
+or network problem (and not a mismatched/broken package install -- check
+with `dpkg -l | grep linuxcnc` first if you want to rule that out, but it's
+almost always fine). It means the generated `.hal` tried to load the
+`hm2_eth` board driver without first loading the core `hostmot2` module
+that exports `hm2_register` -- `hm2_eth` (and any other Mesa board driver)
+always needs `loadrt hostmot2` immediately before it. This was a bug in
+`lcaf.utils.joint_configuration`'s HAL generator (fixed after this note was
+added); if you hit this, `git pull` to pick up the fix, then regenerate
+`configs/generated/*` (the command earlier in this section) before
+retrying `linuxcnc configs/generated/LCAF_Forge.ini`. Check
+`configs/generated/LCAF_Forge.hal` has a `loadrt hostmot2` line right
+before the `loadrt hm2_eth` line to confirm.
+
 To run the toolpath slicer UI instead (a separate, offline planning tool
 that never touches LinuxCNC -- see
 [toolpath_slicer_ui_guide.md](toolpath_slicer_ui_guide.md)) on the Pi's own
