@@ -21,7 +21,8 @@ def make_switched_joint(joint: int = 0, axis: str = "X") -> JointConfiguration:
         negative_limit_input=f"hm2_7i76e.0.7i76.0.0.input-{2 * joint:02d}",
         positive_limit_input=f"hm2_7i76e.0.7i76.0.0.input-{2 * joint + 1:02d}",
         has_limit_switches=True,
-        max_travel=10.0,
+        retracted_distance=0.0,
+        extended_distance=10.0,
     )
 
 
@@ -77,6 +78,80 @@ class HardLimitFaultDetectionTests(unittest.TestCase):
         self.axis.poll()
 
         self.assertEqual(self.axis.status.state, AxisState.FAULT)
+
+
+class RetractToZeroTests(unittest.TestCase):
+    """
+    Axis.retract_to_zero() re-seeks this axis's negative limit switch to
+    re-zero it -- used by MotionCoordinator before every retract, not just
+    once at home_all() -- see docs/hardware_setup.md section 7
+    ("Retract-to-zero"). Requires the axis to have already completed
+    initial homing at least once (LinuxCNCAxialInterface.axis_homed), and a
+    hard-limit trip while RETRACTING must not fault the axis, the same way
+    HOMING is already exempt.
+    """
+
+    def setUp(self):
+        self.fake_linuxcnc = sys.modules["linuxcnc"]
+        self.fake_hal = sys.modules["hal"]
+        self.fake_hal.pins.clear()
+
+        self.joint = make_switched_joint()
+        self.machine = LinuxCNCMachineInterface(use_native_homing=False)
+        self.stat = self.fake_linuxcnc._last_stat
+        self.axis = Axis(self.joint, self.machine)
+
+        self.axis.poll()
+        self.assertEqual(self.axis.status.state, AxisState.READY)
+
+        # Simulate initial homing having already completed once this
+        # session, without re-deriving the full seek-min/seek-max sequence
+        # (already covered by test_linuxcnc_interface.py) -- retract_to_zero
+        # only requires axis_homed to be True beforehand.
+        self.axis.axial_interface.axis_homed = True
+
+    def neg_pin(self) -> str:
+        return self.joint.negative_limit_hal_pin
+
+    def test_retract_to_zero_completes_and_reports_retracted(self):
+        self.axis.retract_to_zero()
+        self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
+        self.assertFalse(self.axis.is_retracted())
+
+        # First poll() issues start_retract_to_zero().
+        self.axis.poll()
+        self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
+        self.assertFalse(self.axis.is_retracted())
+
+        self.fake_hal.pins[self.neg_pin()] = True
+        self.axis.poll()
+
+        self.assertEqual(self.axis.status.state, AxisState.READY)
+        self.assertTrue(self.axis.is_retracted())
+
+    def test_hard_limit_true_during_retracting_does_not_fault(self):
+        self.axis.retract_to_zero()
+        self.axis.poll()
+        self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
+
+        self.stat.joint[self.joint.joint]["min_hard_limit"] = True
+        self.axis.poll()
+
+        self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
+        self.assertFalse(self.axis.has_fault())
+
+    def test_is_retracted_resets_on_next_retract_call(self):
+        self.axis.retract_to_zero()
+        self.axis.poll()
+        self.fake_hal.pins[self.neg_pin()] = True
+        self.axis.poll()
+        self.assertTrue(self.axis.is_retracted())
+
+        self.fake_hal.pins.clear()
+        self.axis.retract_to_zero()
+
+        self.assertFalse(self.axis.is_retracted())
+        self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
 
 
 if __name__ == "__main__":

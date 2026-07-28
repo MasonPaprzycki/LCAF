@@ -66,7 +66,7 @@ else
 fi
 export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
-echo "==> Regenerating configs/generated/* from configs/machine.json + configs/axis.jsonl"
+echo "==> Regenerating configs/generated/* from configs/machine.json + configs/axis.json"
 python3 -c "
 from lcaf.utils.joint_configuration import load_machine_configuration, write_config_files
 write_config_files(load_machine_configuration('configs/machine.json'), 'configs/generated')
@@ -77,7 +77,7 @@ cat <<EOF
 
 ==> Setup complete.
 
-Before going further, confirm configs/axis.jsonl and configs/machine.json
+Before going further, confirm configs/axis.json and configs/machine.json
 actually match YOUR wiring (docs/hardware_setup.md sections 7-9) -- this
 script regenerated from whatever is already checked in, it did not verify
 that against real hardware.

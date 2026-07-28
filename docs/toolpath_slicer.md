@@ -430,7 +430,7 @@ machine X/Y/Z travel.
 The rotary (A) axis is continuous on this machine and free to rotate either
 direction from wherever it was sitting at power-on (there is no cable-wrap
 constraint -- see `docs/hardware_setup.md`), so any signed `rotation` value
-is valid and not limited by the planner or `configs/axis.jsonl`.
+is valid and not limited by the planner or `configs/axis.json`.
 
 ## Limits of the computational-geometry model
 

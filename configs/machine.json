@@ -1,6 +1,6 @@
 {
     "machine_name": "LCAF_Forge",
-    "axis_config_path": "axis.jsonl",
+    "axis_config_path": "axis.json",
 
     "linear_units": "inch",
     "angular_units": "degree",

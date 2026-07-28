@@ -310,6 +310,58 @@ class MotionCoordinator:
             raise
 
 
+    def retract_axis(self, axis: str):
+        """
+        Command a single axis to retract (Axis.retract_to_zero()) -- for
+        almost every axis that means re-seeking its negative limit switch
+        rather than trusting a commanded "0.0" position (see
+        LinuxCNCAxialInterface.start_retract_to_zero() for why: these are
+        open-loop stepper joints with no position feedback, so trusting an
+        accumulated commanded position instead of re-referencing to the
+        physical switch risks silent drift -- docs/potential_issues.md).
+        This project's Y axis is the one exception
+        (JointConfiguration.retract_to): it retracts to its configured
+        retract_to position instead, since its retracted position is
+        mechanically partway into its positive-direction travel -- see
+        LinuxCNCAxialInterface.start_retract_to_zero().
+        """
+
+        if axis not in self.axes:
+
+            self.logger.error(f"Invalid axis command: axis={axis}")
+
+            raise ValueError(f"Unknown axis {axis}")
+
+
+        self.logger.info(f"RETRACT COMMAND: axis={axis}")
+
+        try:
+
+            self.axes[axis].retract_to_zero()
+
+            self.logger.info(f"RETRACT ACCEPTED: axis={axis}")
+
+
+        except Exception as e:
+
+            self.logger.exception(
+                f"RETRACT COMMAND FAILED: axis={axis}, error={e}"
+            )
+
+            raise
+
+    def is_axis_retracted(self, axis: str) -> bool:
+        """
+        True once axis's most recent retract_axis() call has completed --
+        see Axis.is_retracted().
+        """
+
+        if axis not in self.axes:
+            self.logger.error(f"Invalid axis command: axis={axis}")
+            raise ValueError(f"Unknown axis {axis}")
+
+        return self.axes[axis].is_retracted()
+
     def home_all(self):
         """
         Home all machine axes.
@@ -381,42 +433,42 @@ class MotionCoordinator:
 
         # Retract Z
         if self.state == MotionCoordinatorState.RETRACT_Z:
-            self.move_axis("z", 0.0)
+            self.retract_axis("z")
             self.state = MotionCoordinatorState.VERIFY_Z_RETRACTED
 
             return
 
         # Verify Z retracted
         if self.state == MotionCoordinatorState.VERIFY_Z_RETRACTED:
-            if self.is_axis_in_position("z", 0.0) and self.all_idle():
+            if self.is_axis_retracted("z") and self.all_idle():
                 self.state = MotionCoordinatorState.RETRACT_Y
 
             return
 
         # Retract Y
         if self.state == MotionCoordinatorState.RETRACT_Y:
-            self.move_axis("y", 0.0)
+            self.retract_axis("y")
             self.state = MotionCoordinatorState.VERIFY_Y_RETRACTED
 
             return
 
         # Verify Y Retracted
         if self.state == MotionCoordinatorState.VERIFY_Y_RETRACTED:
-            if self.is_axis_in_position("y", 0.0) and self.all_idle():
+            if self.is_axis_retracted("y") and self.all_idle():
                 self.state = MotionCoordinatorState.RETRACT_X
 
             return
 
          # Retract X
         if self.state == MotionCoordinatorState.RETRACT_X:
-            self.move_axis("x", 0.0)
+            self.retract_axis("x")
             self.state = MotionCoordinatorState.VERIFY_X_RETRACTED
 
             return
 
         # Verify X Retract
         if self.state == MotionCoordinatorState.VERIFY_X_RETRACTED:
-            if self.is_axis_in_position("x", 0.0) and self.all_idle():
+            if self.is_axis_retracted("x") and self.all_idle():
                 self.state = MotionCoordinatorState.ROTATE_A
 
             return

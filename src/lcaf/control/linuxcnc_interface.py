@@ -144,7 +144,14 @@ class LinuxCNCAxialInterface:
         #     self.max_limit["native"]
         #     self.min_limit["mm"] / self.max_limit["mm"] (linear joints only)
         #
-        # using the measured travel of the axis.
+        # using the measured travel of the axis -- but only when
+        # joint.dual_limit_switches is True (this joint has a switch at
+        # both ends). When it's False (one limit switch: only the negative
+        # end is wired), homing still seeks that one switch to establish
+        # zero, but then trusts joint.extended_distance as configured
+        # instead of measuring it, since there's no second switch to seek.
+        # See JointConfiguration.dual_limit_switches and
+        # _start_software_homing/poll_homing below.
 
         # Homing phase state -- see start_homing()/poll_homing(). None means
         # no homing in progress. Homing never blocks the caller: each
@@ -156,6 +163,15 @@ class LinuxCNCAxialInterface:
         self._homing_start_time: float = 0.0
         self._homing_speed: float = 0.0
         self._homing_timeout: float = 30.0
+
+        # Retract-to-zero phase state -- see start_retract_to_zero()/
+        # poll_retract_to_zero() below. Separate from _homing_phase (and
+        # never touches axis_homed/min_limit/max_limit the way initial
+        # homing does) since MotionCoordinator runs this repeatedly, once
+        # per retract, for the lifetime of the session -- not just once at
+        # startup.
+        self._retract_phase: str | None = None
+        self._retract_start_time: float = 0.0
 
     # Status update
     def poll(self):
@@ -382,10 +398,20 @@ class LinuxCNCAxialInterface:
             if self.min_limit_active():
                 self.soft_stop()
                 self.position_offset_to_native = self.get_linuxcnc_native_position()
-                self._jog_toward_limit_switch(positive=True)
-                self._homing_phase = "software_seek_max"
-                self._homing_start_time = time.monotonic()
-                return False
+
+                if self.joint.dual_limit_switches:
+                    self._jog_toward_limit_switch(positive=True)
+                    self._homing_phase = "software_seek_max"
+                    self._homing_start_time = time.monotonic()
+                    return False
+
+                # Single-limit-switch joint: zero is established, and there
+                # is no second switch to seek -- trust the configured
+                # extended_distance (see JointConfiguration.dual_limit_switches).
+                self._set_homed_limits()
+                self.axis_homed = True
+                self._homing_phase = None
+                return True
 
             if time.monotonic() - self._homing_start_time > self._homing_timeout:
                 self.soft_stop()
@@ -417,6 +443,174 @@ class LinuxCNCAxialInterface:
     def is_homing_in_progress(self) -> bool:
         return self._homing_phase is not None
 
+    # Retract-to-zero -- re-seek the negative limit switch before every
+    # retract move (see MotionCoordinator/Axis.retract_to_zero()), not just
+    # once at process start. These joints are open-loop steppers with no
+    # position feedback (docs/potential_issues.md): the commanded "0.0"
+    # position can silently drift from true mechanical zero as steps are
+    # missed over a session, so re-referencing to the physical switch on
+    # every retract -- instead of trusting the accumulated commanded
+    # position -- is the only way this project can catch that drift.
+    #
+    # joint.retract_to (this project's Y, set to 1.5) is the one exception:
+    # its "retract" is a plain move to that configured position instead,
+    # with no switch to re-reference against -- see start_retract_to_zero().
+    #
+    # Deliberately separate from _homing_phase/start_homing/poll_homing:
+    # this never touches axis_homed, min_limit, or max_limit (a
+    # dual_limit_switches joint's measured travel from initial homing must
+    # survive every later retract unchanged), and it requires initial
+    # homing to have already completed once.
+    def is_retract_in_progress(self) -> bool:
+        return self._retract_phase is not None
+
+    def start_retract_to_zero(self, speed: float = 0.03937, timeout: float = 30.0):
+        """
+        Begin retracting this joint -- for almost every joint that means
+        re-seeking the negative limit switch to re-establish zero, without
+        touching the previously-established max_limit (unlike
+        start_homing(), which -- for a dual_limit_switches joint -- also
+        remeasures travel by seeking the positive switch). Call
+        poll_retract_to_zero() every subsequent heartbeat until it returns
+        True (or raises) to actually advance and complete it -- mirrors
+        start_homing()/poll_homing()'s non-blocking phase pattern.
+
+        joint.retract_to changes what "retract" means for this particular
+        joint -- see its docstring (this project's Y axis is mechanically
+        arranged so its retracted position is partway into its
+        positive-direction travel, not zero). In that case this instead
+        commands a plain move to joint.retract_to in the coordinate frame
+        already established by the last full home_all() -- there is no
+        limit switch at that position to re-seek against, so this path
+        never re-references position_offset_to_native the way the
+        negative-switch retract does.
+
+        Only valid for a switched joint (has_limit_switches) that has
+        already completed its initial start_homing()/poll_homing() --
+        raises RuntimeError otherwise (a fresh, never-homed joint has no
+        min_limit/max_limit established yet and should go through
+        start_homing() instead, which does everything this does plus the
+        initial travel measurement/establishment).
+        """
+        if not self.joint.has_limit_switches:
+            raise RuntimeError(
+                f"Joint {self.joint.joint} ({self.joint.axis}) has no limit switches -- "
+                "retract-to-zero is only meaningful for a switched joint."
+            )
+
+        if not self.axis_homed:
+            raise RuntimeError(
+                f"Joint {self.joint.joint} ({self.joint.axis}) must complete initial homing "
+                "(start_homing/poll_homing) before it can retract-to-zero."
+            )
+
+        self._homing_speed = speed
+        self._homing_timeout = timeout
+        self.poll()
+        self._retract_start_time = time.monotonic()
+
+        if self.joint.retract_to is not None:
+            target_machine_units = self.to_machine_units(self.joint.retract_to)
+            feed_per_minute = self.to_machine_units(speed) * 60
+            self.move(target_machine_units, feed=feed_per_minute)
+            self._retract_phase = "move_to_retract_position"
+        elif self.machine.use_native_homing:
+            # LinuxCNC's own native homing always re-seeks the negative
+            # switch and never remeasures travel (MAX_LIMIT is a static INI
+            # value regardless of dual_limit_switches -- see
+            # generate_ini()), so rerunning it here already is exactly a
+            # retract-to-zero, with no separate code path needed.
+            self.command.mode(linuxcnc.MODE_MANUAL)
+            self.command.wait_complete()
+            self.command.home(self.joint.joint)
+            self._retract_phase = "native_wait"
+        else:
+            self._jog_toward_limit_switch(positive=False)
+            self._retract_phase = "software_seek_min"
+
+    def poll_retract_to_zero(self) -> bool:
+        """
+        Advance retract-to-zero by at most one step. Returns True once
+        re-zeroing has completed; False while still in progress. Raises
+        RuntimeError on a reported LinuxCNC joint fault, or TimeoutError if
+        the configured timeout elapses first -- Axis.poll() catches both
+        and moves the axis to AxisState.FAULT. See start_retract_to_zero().
+        """
+        if self._retract_phase is None:
+            return True
+
+        self.poll()
+
+        if self._retract_phase == "move_to_retract_position":
+            joint_status = self.status.joint[self.joint.joint]
+
+            if joint_status["fault"]:
+                self._retract_phase = None
+                raise RuntimeError(
+                    f"Joint {self.joint.joint} ({self.joint.axis}) faulted while retracting "
+                    "to its configured retract_to position."
+                )
+
+            if self.is_axis_in_position():
+                self._retract_phase = None
+                return True
+
+            if time.monotonic() - self._retract_start_time > self._homing_timeout:
+                self._retract_phase = None
+                raise TimeoutError(
+                    f"Timed out waiting for joint {self.joint.joint} ({self.joint.axis}) "
+                    "to reach its configured retract_to position during retract."
+                )
+
+            return False
+
+        if self._retract_phase == "native_wait":
+            joint_status = self.status.joint[self.joint.joint]
+
+            if joint_status["fault"]:
+                self._retract_phase = None
+                raise RuntimeError(
+                    f"Joint {self.joint.joint} ({self.joint.axis}) faulted while retracting to zero."
+                )
+
+            if joint_status["homed"]:
+                # HOME_OFFSET is always 0.0 (see generate_ini()), so native
+                # position 0 is already this project's own coordinate zero.
+                self.position_offset_to_native = 0.0
+                self._retract_phase = None
+                return True
+
+            if time.monotonic() - self._retract_start_time > self._homing_timeout:
+                self._retract_phase = None
+                raise TimeoutError(
+                    f"Timed out waiting for joint {self.joint.joint} ({self.joint.axis}) "
+                    "to re-home during retract-to-zero."
+                )
+
+            return False
+
+        if self._retract_phase == "software_seek_min":
+            # Re-armed every heartbeat -- see the matching comment in
+            # poll_homing()'s software_seek_min branch.
+            self.command.override_limits()
+
+            if self.min_limit_active():
+                self.soft_stop()
+                self.position_offset_to_native = self.get_linuxcnc_native_position()
+                self._retract_phase = None
+                return True
+
+            if time.monotonic() - self._retract_start_time > self._homing_timeout:
+                self.soft_stop()
+                self._retract_phase = None
+                raise TimeoutError(
+                    "Timed out waiting for the minimum limit switch during retract-to-zero."
+                )
+
+            return False
+
+        return False
+
     def _start_software_homing(self):
         """
         This project's own software homing, phase setup: jog toward a limit
@@ -429,8 +623,8 @@ class LinuxCNCAxialInterface:
         if not self.joint.has_limit_switches:
             # Continuous/switchless joint (A): there is nothing to seek.
             # Zero at the current position and trust the configured static
-            # max_travel/min_travel (JointConfiguration guarantees
-            # max_travel is set when has_limit_switches is False).
+            # retracted_distance/extended_distance (JointConfiguration
+            # requires both to be set for every joint).
             self.position_offset_to_native = self.get_linuxcnc_native_position()
             self._set_homed_limits()
             self.axis_homed = True
@@ -442,8 +636,19 @@ class LinuxCNCAxialInterface:
 
         if self.min_limit_active():
             self.position_offset_to_native = self.get_linuxcnc_native_position()
-            self._jog_toward_limit_switch(positive=True)
-            self._homing_phase = "software_seek_max"
+
+            if self.joint.dual_limit_switches:
+                self._jog_toward_limit_switch(positive=True)
+                self._homing_phase = "software_seek_max"
+            else:
+                # Single-limit-switch joint (dual_limit_switches=False):
+                # already sitting on the only switch it has, so zero is
+                # already established -- trust the configured
+                # extended_distance instead of seeking a second switch that
+                # doesn't exist.
+                self._set_homed_limits()
+                self.axis_homed = True
+                self._homing_phase = None
         else:
             self._jog_toward_limit_switch(positive=False)
             self._homing_phase = "software_seek_min"
@@ -452,18 +657,19 @@ class LinuxCNCAxialInterface:
         """
         Set min_limit/max_limit once homing has established where native
         position 0 is. measured_max_native, if given, overrides the
-        configured max_travel with an actual measured travel distance
-        (software homing on a switched joint only -- see
+        configured extended_distance with an actual measured travel
+        distance (software homing on a switched joint only -- see
         _start_software_homing/poll_homing). Every other case trusts the
-        configured max_travel/min_travel (JointConfiguration.min_travel is
-        0.0 for a switched joint, -max_travel for a switchless angular one
-        -- see its docstring).
+        configured retracted_distance/extended_distance
+        (JointConfiguration.min_travel is -retracted_distance -- see its
+        docstring).
         """
-        assert self.joint.max_travel is not None
+        assert self.joint.retracted_distance is not None
+        assert self.joint.extended_distance is not None
 
         self.min_limit["native"] = self.joint.min_travel
         self.max_limit["native"] = (
-            measured_max_native if measured_max_native is not None else self.joint.max_travel
+            measured_max_native if measured_max_native is not None else self.joint.extended_distance
         )
         if not self.joint.is_angular:
             self.min_limit["mm"] = self.min_limit["native"] * 25.4
@@ -478,7 +684,7 @@ class LinuxCNCAxialInterface:
 
     def move(self, position: float, feed: float = 1000):
         # G21 pins this MDI to millimetres regardless of the machine's native
-        # TRAJ units (inches -- see configs/machine.json / axis.jsonl). Every
+        # TRAJ units (inches -- see configs/machine.json / axis.json). Every
         # position/feed value reaching this method originates from
         # lcaf.toolpathing (ToolpathOperation.x/y/die_gap/rotation), which is
         # generated in millimetres; without an explicit units word here the

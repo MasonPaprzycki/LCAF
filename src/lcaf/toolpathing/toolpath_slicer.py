@@ -49,6 +49,7 @@ generated.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import struct
 from dataclasses import dataclass, field
@@ -56,6 +57,8 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .material import MATERIALS
+
+_logger = logging.getLogger(__name__)
 
 
 Point3 = tuple[float, float, float]
@@ -115,10 +118,11 @@ class TriangleMesh:
 class MachineLimits:
     """Machine-coordinate limits used to reject unsafe generated operations.
 
-    Zero-based on every axis, matching the machine's own [0, max_travel]
-    convention (see docs/hardware_setup.md) -- these defaults are only a
-    fallback for when configs/axis.jsonl can't be read (see
-    from_lcaf_config()); real limits should always come from there.
+    Zero-based on every axis, matching the machine's own
+    [-retracted_distance, extended_distance] convention (see
+    docs/hardware_setup.md) -- these defaults are only a fallback for when
+    configs/axis.json can't be read (see from_lcaf_config()); real limits
+    should always come from there.
     """
 
     x_min_mm: float = 0.0
@@ -130,24 +134,26 @@ class MachineLimits:
 
     @classmethod
     def from_lcaf_config(cls, filename: str | Path) -> "MachineLimits":
-        """Read machine X/Y/Z travel limits from ``configs/axis.jsonl``.
+        """Read machine X/Y/Z travel limits from ``configs/axis.json``.
 
-        These are the same max_travel each JointConfiguration carries for
-        LinuxCNC's own INI generation (see lcaf.utils.joint_configuration)
-        -- there is a single on-disk source for machine travel limits, not a
-        separate copy for the slicer. JointConfiguration stores this in
-        inches (configs/machine.json declares LINEAR_UNITS=inch for LinuxCNC
-        itself) measured from a fixed zero (every switched joint's travel is
-        [0, max_travel], see the max_travel docstring), while this planner's
-        whole coordinate space is millimetres (see module docstring), so
-        max_travel is scaled by 25.4 on the way in and the minimum is always
-        0.0.
+        These are the same retracted_distance/extended_distance each
+        JointConfiguration carries for LinuxCNC's own INI generation (see
+        lcaf.utils.joint_configuration) -- there is a single on-disk source
+        for machine travel limits, not a separate copy for the slicer.
+        JointConfiguration stores these in inches (configs/machine.json
+        declares LINEAR_UNITS=inch for LinuxCNC itself) measured from a
+        fixed zero (every joint's travel is [-retracted_distance,
+        extended_distance], see the retracted_distance/extended_distance
+        docstrings), while this planner's whole coordinate space is
+        millimetres (see module docstring), so both are scaled by 25.4 on
+        the way in.
 
         This lines up with the planner's own X convention: X=0 is the clamp
         (see module docstring), the same physical point homing gives machine
         X=0, so every generated X is already >= 0 by construction -- there
         is no separate reconciliation needed between the planner's frame and
-        this zero-based machine range.
+        this zero-based machine range (X/Y's retracted_distance is 0 in
+        axis.json, matching that convention).
 
         The rotary (A) axis is continuous on this machine (see
         JointConfiguration.has_limit_switches) and is not limited here; only
@@ -165,16 +171,34 @@ class MachineLimits:
 
         by_axis = {joint.axis: joint for joint in joints}
 
+        def bound_mm(joint, distance, sign: float, field_name: str) -> float:
+            """Convert one signed native-unit distance to millimetres, or --
+            if the joint's axis.json leaves it null -- disable this end of
+            the software travel-limit check entirely (see
+            JointConfiguration.retracted_distance/extended_distance) and log
+            a warning, since that removes a real crash-prevention check on
+            this planner's generated moves.
+            """
+            if distance is None:
+                _logger.warning(
+                    f"MachineLimits.from_lcaf_config({path}): {joint.axis} axis has a null "
+                    f"{field_name} -- this disables the toolpath planner's software "
+                    f"travel-limit check on that end of {joint.axis}; only a physical limit "
+                    "switch or mechanical stop protects it now."
+                )
+                return sign * math.inf
+            return sign * float(distance) * 25.4
+
         try:
             x, y, z = by_axis["X"], by_axis["Y"], by_axis["Z"]
 
             return cls(
-                x_min_mm=0.0,
-                x_max_mm=float(x.max_travel) * 25.4,
-                y_min_mm=0.0,
-                y_max_mm=float(y.max_travel) * 25.4,
-                z_retracted_mm=0.0,
-                z_extended_mm=float(z.max_travel) * 25.4,
+                x_min_mm=bound_mm(x, x.retracted_distance, -1.0, "retracted_distance"),
+                x_max_mm=bound_mm(x, x.extended_distance, 1.0, "extended_distance"),
+                y_min_mm=bound_mm(y, y.retracted_distance, -1.0, "retracted_distance"),
+                y_max_mm=bound_mm(y, y.extended_distance, 1.0, "extended_distance"),
+                z_retracted_mm=bound_mm(z, z.retracted_distance, -1.0, "retracted_distance"),
+                z_extended_mm=bound_mm(z, z.extended_distance, 1.0, "extended_distance"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ToolpathPlanningError(

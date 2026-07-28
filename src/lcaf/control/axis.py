@@ -14,6 +14,7 @@ class AxisState(Enum):
     READY = auto()
     MOVING = auto()
     HOMING = auto()
+    RETRACTING = auto()
     FAULT = auto()
     ESTOP = auto()
 
@@ -36,6 +37,9 @@ class Axis:
         self.status = AxisStatus(self.axis)
         self.logger = logging.getLogger(f"Motor-{self.axis}")
 
+        self._retract_command_issued = False
+        self._retracted = False
+
     def poll(self):
 
         self.axial_interface.poll()
@@ -50,18 +54,19 @@ class Axis:
                 "(following error tripped -- see docs/potential_issues.md)."
             )
 
-        # HOMING is excluded: software homing deliberately drives this joint
-        # onto its own limit switch to find it (see
+        # HOMING and RETRACTING are excluded: software homing and
+        # retract-to-zero both deliberately drive this joint onto its own
+        # negative limit switch to find it (see
         # LinuxCNCAxialInterface._jog_toward_limit_switch), so
-        # is_on_hard_limit() reading True during that phase is expected, not
-        # a fault. Anywhere else, LinuxCNC reporting this joint on a hard
+        # is_on_hard_limit() reading True during either phase is expected,
+        # not a fault. Anywhere else, LinuxCNC reporting this joint on a hard
         # limit means every joint's enable output has just been disabled
         # machine-wide (see docs/hardware_setup.md) -- a different condition
         # from is_faulted() above (that only reflects following error, never
         # a hard-limit trip), so without this check it would go completely
         # unnoticed here.
         if (
-            self.status.state not in (AxisState.FAULT, AxisState.HOMING)
+            self.status.state not in (AxisState.FAULT, AxisState.HOMING, AxisState.RETRACTING)
             and self.axial_interface.is_on_hard_limit()
         ):
             self.status.fault = True
@@ -100,6 +105,24 @@ class Axis:
                 self.status.state = AxisState.FAULT
                 self.logger.error(f"{self.axis}: Homing failed: {e}")
 
+        # Retract-to-zero detection (see retract_to_zero()/is_retracted())
+        elif self.status.state == AxisState.RETRACTING:
+            try:
+                if not self._retract_command_issued:
+                    self.axial_interface.start_retract_to_zero()
+                    self._retract_command_issued = True
+                    return
+
+                if self.axial_interface.poll_retract_to_zero():
+                    self._retracted = True
+                    self.status.state = AxisState.READY
+                    self.logger.info(f"{self.axis}: Retract-to-zero complete.")
+
+            except (RuntimeError, TimeoutError) as e:
+                self.status.fault = True
+                self.status.state = AxisState.FAULT
+                self.logger.error(f"{self.axis}: Retract-to-zero failed: {e}")
+
         # Motion completion
         elif self.status.state == AxisState.MOVING:
             if not self.axial_interface.has_axis_been_homed():
@@ -117,6 +140,36 @@ class Axis:
 
     def is_homed(self):
         return self.axial_interface.has_axis_been_homed()
+
+    def retract_to_zero(self):
+        """
+        Begin retracting this axis -- for almost every axis that means
+        re-zeroing against its negative limit switch before the move,
+        rather than trusting the commanded "0.0" position (see
+        LinuxCNCAxialInterface.start_retract_to_zero() for why). This
+        project's Y axis is the one exception (JointConfiguration.
+        retract_to): mechanically its retracted position is partway into
+        its positive-direction travel, so it instead moves to its
+        configured retract_to position -- still routed through this same
+        method/state, since LinuxCNCAxialInterface handles the distinction
+        internally. Mirrors
+        home(): MotionCoordinator calls this once per retract, then polls
+        is_retracted() every heartbeat while poll() (above) advances it.
+        """
+        self.status.state = AxisState.RETRACTING
+        self._retract_command_issued = False
+        self._retracted = False
+        if self.axial_interface.joint.retract_to is not None:
+            self.logger.info(f"{self.axis}: Retracting (moving to configured retract position)")
+        else:
+            self.logger.info(f"{self.axis}: Retracting to zero (re-seeking negative limit switch)")
+
+    def is_retracted(self):
+        """
+        True once the most recent retract_to_zero() call has completed.
+        Reset to False by the next retract_to_zero() call.
+        """
+        return self._retracted
 
     def move(self, position, feed=1000):
         """

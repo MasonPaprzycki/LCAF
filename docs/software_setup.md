@@ -111,7 +111,7 @@ Add that line to `~/.bashrc` if you don't want to retype it every session.
 ## 5. Running it
 
 With the Mesa card wired and networked (`hardware_setup.md` sections 4-5)
-and `configs/axis.jsonl`/`machine.json` edited for your hardware
+and `configs/axis.json`/`machine.json` edited for your hardware
 (`hardware_setup.md` sections 8-9), run these in order. Each step says what
 you should actually see before moving to the next one -- if it doesn't
 match, stop and fix that step rather than continuing.
@@ -132,7 +132,7 @@ python3 -c "from lcaf.utils.joint_configuration import load_machine_configuratio
 You should see no output and get your shell prompt back immediately (this
 only renders text files -- it never touches `linuxcnc`/`hal`). Check
 `configs/generated/LCAF_Forge.hal`, `.ini`, and `tool.tbl` now exist. A
-traceback here means a problem in `configs/machine.json`/`axis.jsonl`
+traceback here means a problem in `configs/machine.json`/`axis.json`
 themselves (fix the config, not the generator).
 
 `tool.tbl` is a minimal, empty LinuxCNC tool table -- LCAF has no tool

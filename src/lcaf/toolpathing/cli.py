@@ -87,8 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--machine-config",
         type=Path,
-        default=Path("configs/axis.jsonl"),
-        help="LCAF joint-configuration JSONL file (machine X/Y/Z travel limits)",
+        default=Path("configs/axis.json"),
+        help="LCAF joint-configuration JSON file (machine X/Y/Z travel limits)",
     )
     parser.add_argument(
         "--die-width",

@@ -2,7 +2,7 @@
 
 This is the wiring and configuration guide for this project's target
 hardware. It covers the physical board, where to wire motors and limit
-switches, and what every field in `configs/axis.jsonl` /
+switches, and what every field in `configs/axis.json` /
 `configs/machine.json` means. For how to set up the Raspberry Pi itself
 (installing LinuxCNC, getting this repo onto it, running the control
 software), see [software_setup.md](software_setup.md). For open concerns
@@ -10,7 +10,7 @@ that still need checking on real hardware, see
 [potential_issues.md](potential_issues.md).
 
 ```
-configs/machine.json + configs/axis.jsonl
+configs/machine.json + configs/axis.json
            |
            v
 lcaf.utils.joint_configuration  (generate_hal / generate_ini)
@@ -27,7 +27,7 @@ lcaf.control.linuxcnc_interface (LinuxCNCMachineInterface / LinuxCNCAxialInterfa
 
 You should never need to hand-write a `.hal`/`.ini` file, or touch
 `linuxcnc_interface.py`/`axis.py`/`motion_coordinator.py`, to add a motor or
-change a pin. Edit `configs/axis.jsonl` (per-joint hardware) and
+change a pin. Edit `configs/axis.json` (per-joint hardware) and
 `configs/machine.json` (machine-wide settings); everything below them
 regenerates itself.
 
@@ -46,7 +46,7 @@ optionally, one enable output and a pair of limit-switch inputs:
 | 2 | Z | TB2 pins 14-17 (STEP2, DIR2) | OUTPUT2 (pin 19) | INPUT4 neg (pin 5), INPUT5 pos (pin 6) |
 | 3 | A | TB3 pins 2-5 (STEP4, DIR4) | OUTPUT3 (pin 20) | none -- A is continuous, see section 5 |
 
-Every column above is just a Mesa HAL pin name set in `axis.jsonl`
+Every column above is just a Mesa HAL pin name set in `axis.json`
 (`mesa_stepgen`, `enable_output`, `negative_limit_input`,
 `positive_limit_input`) -- `generate_hal()` wires exactly this table into
 the `.hal` file for you. You don't need to know HAL syntax to add a motor;
@@ -117,11 +117,24 @@ limit." A has no limit switches; see section 6 for why.
 Use the table in section 1 for which TB6 pin is which joint's negative/
 positive input. If your switches are wired the opposite way (normally
 open, or you can't rewire them), set `invert_negative_limit` /
-`invert_positive_limit` for that joint in `axis.jsonl` instead of
+`invert_positive_limit` for that joint in `axis.json` instead of
 rewiring. The two switches on a joint must be different physical inputs --
-`JointConfiguration` refuses to load an `axis.jsonl` that wires
+`JointConfiguration` refuses to load an `axis.json` that wires
 `negative_limit_input` and `positive_limit_input` to the same pin, since
 there would be no way to tell which end of travel was actually reached.
+
+**One switch or two?** `JointConfiguration.dual_limit_switches` supports
+both, but this project's own X/Y/Z are all wired **single-switch**: one
+negative (zero-end) limit switch each, with `positive_limit_input: null`
+and `dual_limit_switches: false` in `axis.json`. Homing seeks the one
+negative switch to establish zero, then stops there and trusts the
+configured `extended_distance` as a static limit rather than measuring it
+(there is no second switch to seek). If a joint ever does get a second,
+positive-end switch wired, set `dual_limit_switches: true` and
+`positive_limit_input` to that pin instead -- homing would then also seek
+it and *measure* the actual travel between the two switches, overriding
+`extended_distance` with that live measurement. See
+`JointConfiguration.dual_limit_switches` and section 7 below.
 
 ### What a tripped limit switch actually does
 
@@ -152,7 +165,8 @@ If what you actually want is "block further travel past the negative
 switch but still allow positive travel, and vice versa," that already
 happens for ordinary point-to-point moves through each joint's *soft*
 limits (`[JOINT_n] MIN_LIMIT`/`MAX_LIMIT` in the generated INI, derived
-from `max_travel`) plus `Axis.move()`'s own `is_position_in_range()` check
+from `retracted_distance`/`extended_distance`) plus `Axis.move()`'s own
+`is_position_in_range()` check
 before it ever issues a move. The hard switches are a last-resort backstop
 behind that, not the primary mechanism -- deliberately, because these are
 open-loop steppers with no position feedback (`docs/potential_issues.md`),
@@ -175,10 +189,17 @@ enable-polarity DIP switch -- the 7I76E's outputs have no software invert.
 
 A is a continuous rotary joint: "home" is simply wherever it's sitting when
 it powers on (no seeking, no switches -- `"has_limit_switches": false` for
-joint 3 in `axis.jsonl`), and it is free to rotate either direction from
+joint 3 in `axis.json`), and it is free to rotate either direction from
 there. This project's A joint has no cable-wrap constraint (nothing on
-slip rings needs it), so unlike X/Y/Z its travel is symmetric:
-`[-max_travel, max_travel]` in `axis.jsonl`, not `[0, max_travel]`.
+slip rings needs it), so unlike X/Y/Z its `retracted_distance` and
+`extended_distance` are both `null` in `axis.json`, genuinely disabling
+its software soft limits in both directions rather than approximating
+"unbounded" with an arbitrary large sentinel value. `generate_ini()` omits
+`MIN_LIMIT`/`MAX_LIMIT` for A entirely, which is itself LinuxCNC's own
+documented way of saying "no limit" (it substitutes `-1e99`/`1e99`), and
+`JointConfiguration.__post_init__` logs a warning at load time as a
+reminder that this disables a safety check -- for A that's an accepted
+tradeoff, since it has no physical limit to check against anyway.
 
 ## 7. Two homing strategies: `use_linuxcnc_native_processes`
 
@@ -212,7 +233,7 @@ slip rings needs it), so unlike X/Y/Z its travel is symmetric:
   wires each switched joint's negative-limit input to LinuxCNC's
   `home-sw-in` pin too, and `generate_ini()` fills in real
   `HOME_SEARCH_VEL`/`HOME_LATCH_VEL`/`HOME_SEQUENCE` values, including
-  `HOME_IGNORE_LIMITS = YES`. Nothing else in `axis.jsonl` needs to change
+  `HOME_IGNORE_LIMITS = YES`. Nothing else in `axis.json` needs to change
   to switch modes. This mode never needs `override_limits()` -- LinuxCNC's
   own homing state machine is already exempt from the hard-limit fault
   while it's running.
@@ -221,7 +242,55 @@ Either way, machine coordinate 0 on X/Y/Z is wherever the negative limit
 switch is, and the machine always requires a fresh `home_all()` every
 process start -- see section 9 and `docs/potential_issues.md`.
 
-## 8. Motor configuration fields (`axis.jsonl`)
+`dual_limit_switches` (section 5) only changes behavior in the `false`
+(software-homing) mode above -- native homing already never remeasures
+travel either way, so a one- or two-limit-switch joint homes identically
+under `use_linuxcnc_native_processes: true`.
+
+### Retract-to-zero: re-seeking the switch every retract, not just at boot
+
+Every toolpath operation starts with `MotionCoordinator` retracting Z, then
+Y, then X (`docs/state_machine.md`). Because these are open-loop stepper
+joints with no position feedback (`docs/potential_issues.md`), a plain
+"move to the commanded 0.0" retract would trust whatever position this
+project's own bookkeeping has accumulated, which can silently drift from
+the true mechanical zero if a step was ever missed mid-session. Instead,
+`MotionCoordinator.retract_axis()` -> `Axis.retract_to_zero()` ->
+`LinuxCNCAxialInterface.start_retract_to_zero()`/`poll_retract_to_zero()`
+re-seeks the negative limit switch on **every** retract (not just the
+one-time `home_all()` at process start) and re-zeros from that physical
+reference, the same way initial homing does -- it just never touches the
+`max_limit`/travel established by that initial homing (a
+`dual_limit_switches` joint's *measured* travel must survive unchanged
+across every later retract, and a single-switch joint's configured
+`extended_distance` is likewise left untouched).
+
+**Y is the one exception:** `JointConfiguration.retract_to` is set to `1.5`
+for it, because Y's retracted position is mechanically partway into its
+positive-direction travel, not zero -- there is no positive limit switch to
+re-seek against either (section 5). So for Y, `start_retract_to_zero()`
+instead commands a plain MDI move to `retract_to` in the coordinate
+frame the last `home_all()` already established, and `poll_retract_to_zero()`
+waits for the joint to report in-position rather than for a switch to trip.
+This never re-references `position_offset_to_native` the way the
+negative-switch retract does, so it does not correct for stepper drift the
+same way -- Y still gets a fresh `home_all()` reference every process
+start (section 9) like every other joint, it just isn't re-referenced on
+every single retract. Every other joint keeps `retract_to: null`
+and behaves as described above.
+
+This means the negative switch is now tripped deliberately, routinely,
+every single operation cycle -- not just once at boot the way the rest of
+this document originally described hard-limit trips ("this should never
+happen in normal operation," section 5's "What a tripped limit switch
+actually does"). The same `override_limits()` mechanism covers it
+(`_jog_toward_limit_switch()`, reused as-is), so it still never trips
+LinuxCNC's machine-wide hard-limit fault -- but it does mean the negative
+switch on X/Y/Z sees far more physical actuations over the life of the
+machine than a one-time homing switch would. Budget for that in switch
+selection/maintenance if this matters for your hardware.
+
+## 8. Motor configuration fields (`axis.json`)
 
 One JSON object per line, one line per joint. To add or reconfigure a
 motor, set these:
@@ -239,10 +308,13 @@ motor, set these:
 | `negative_limit_input` / `positive_limit_input` | Field inputs wired to the limit switches -- see section 1's table. `null` for A. Must differ from each other when both are set -- rejected at load time otherwise (section 5). |
 | `is_angular` | `true` for A only. |
 | `has_limit_switches` | `false` for A only -- see section 6. |
+| `dual_limit_switches` | `true` if this joint has a switch at *both* ends of travel and homing should measure the real distance between them; `false` (this project's actual X/Y/Z, despite `true` being the class default) if it only has the one negative/zero-end switch, in which case `positive_limit_input` must be `null` and the configured `extended_distance` is trusted as-is rather than measured. Only meaningful when `has_limit_switches` is `true` -- see section 7. |
+| `retract_to` | The absolute position (native units, same zero as `retracted_distance`/`extended_distance`) this joint moves to on retract instead of re-seeking the negative limit switch -- `1.5` for Y (see section 7's "Retract-to-zero"). `null` (default) for every other joint. Must fall within `[-retracted_distance, extended_distance]` when both are configured. |
 | `inverted` | `true` if the joint moves the wrong physical direction. Flips the motor's direction in software; the normal fix for a reversed motor/lead, cheaper than re-wiring. |
 | `invert_negative_limit` / `invert_positive_limit` | `true` if that limit switch reads backwards from the normally-closed wiring in section 5. |
 | `home_sequence` | Only used when `use_linuxcnc_native_processes` is `true` (section 7). Leave at `-1` to home this joint on its own in "Home All"; LinuxCNC then defaults it to the joint number. |
-| `max_travel` | Total usable travel. For X/Y/Z: the one-directional distance from the negative limit switch, in inches. For A: the symmetric +/- bound in degrees (section 6) -- since A has no physical limit, set this generously (the default is 100000°, i.e. effectively unbounded for any real job). |
+| `retracted_distance` | Positive distance from zero to this joint's retracted (negative-direction) soft limit, in inches (or degrees for A). For X/Y/Z: 0 -- the negative limit switch itself is both zero and the retracted end, so there's normally nothing beyond it. For A: `null` (section 6) -- A has no physical limit and no reference switch, so instead of carrying an arbitrary large sentinel value, this end's soft limit is genuinely disabled (a logged warning at load time says so). Becomes `-retracted_distance` in the generated INI's `MIN_LIMIT` when set; omitted (LinuxCNC then applies its own `-1e99` default) when `null`. |
+| `extended_distance` | Positive distance from zero to this joint's extended (positive-direction) soft limit, in inches (or degrees for A). For X/Y/Z: the one-directional distance from the negative limit switch. For A: `null`, same reasoning as `retracted_distance` above. Becomes the generated INI's `MAX_LIMIT` directly when set; omitted (LinuxCNC default `1e99`) when `null`. Setting either to `null` on any joint disables that end's software safety check the same way -- for X/Y/Z it also disables `lcaf.toolpathing.toolpath_slicer`'s matching travel-limit check, so only do this with a real physical limit switch or mechanical stop backing that end up. |
 | `step_length_ns`, `step_space_ns`, `direction_setup_ns`, `direction_hold_ns` | Stepper driver signal timing in nanoseconds. Defaults are usually fine; check your driver's datasheet if steps are missed or the motor is silent. |
 
 ## 9. Machine-wide fields (`machine.json`)
@@ -250,7 +322,7 @@ motor, set these:
 | Field | Meaning |
 |---|---|
 | `machine_name` | Base name for the generated `.hal`/`.ini` and the INI's `[EMC]MACHINE`. |
-| `axis_config_path` | Path to the joint JSONL file (default `axis.jsonl`). |
+| `axis_config_path` | Path to the joint JSON file (default `axis.json`). |
 | `linear_units`, `angular_units` | Leave as `"inch"`/`"degree"` -- see section 10. |
 | `default_linear_velocity_in_s`, `max_linear_velocity_in_s`, `max_linear_acceleration_in_s2` | Machine-wide linear jog/program defaults and cap, in/s and in/s². |
 | `default_angular_velocity_deg_s`, `max_angular_velocity_deg_s`, `max_angular_acceleration_deg_s2` | Same, for A, in deg/s and deg/s². |
@@ -265,7 +337,7 @@ motor, set these:
 **This machine is configured entirely in inches** for X/Y/Z
 (`"linear_units": "inch"`) and degrees for A (always, independent of
 `linear_units`). If converting a metric-datasheet value (a leadscrew pitch
-in mm, a measured travel in mm) into `axis.jsonl`, divide by 25.4.
+in mm, a measured travel in mm) into `axis.json`, divide by 25.4.
 
 **One deliberate exception:** the toolpath planner (`lcaf.toolpathing`, see
 [toolpath_slicer.md](toolpath_slicer.md)) works entirely in millimetres --
@@ -274,23 +346,27 @@ sends an explicit `G21` so LinuxCNC interprets those millimetre values
 correctly regardless of the inch-native machine config above. You never
 need to convert a toolpath file to inches.
 
-**Every axis is zero-based, matching where it physically starts:**
+**Every axis is zero-based, matching where it physically starts, with range
+`[-retracted_distance, extended_distance]`:**
 
-- **X/Y/Z**: range is `[0, max_travel]`. 0 is wherever homing finds the
-  negative limit switch (measured live in software-homing mode; wherever
-  native homing lands in native mode -- section 7). The toolpath planner's
-  own X=0 is the clamp, the same physical point (see
-  [toolpath_slicer.md](toolpath_slicer.md)), so a normal toolpath needs no
-  manual coordinate-shifting to fit this range.
-- **A**: range is `[-max_travel, max_travel]`. 0 is wherever it was sitting
-  at power-on (section 6); it is free to move either direction from there.
+- **X/Y/Z**: `retracted_distance` is 0, so the range is effectively `[0,
+  extended_distance]`. 0 is wherever homing finds the negative limit switch
+  (measured live in software-homing mode; wherever native homing lands in
+  native mode -- section 7). The toolpath planner's own X=0 is the clamp,
+  the same physical point (see [toolpath_slicer.md](toolpath_slicer.md)),
+  so a normal toolpath needs no manual coordinate-shifting to fit this
+  range.
+- **A**: `retracted_distance` and `extended_distance` are configured equal,
+  so the range is symmetric: `[-extended_distance, extended_distance]`. 0
+  is wherever it was sitting at power-on (section 6); it is free to move
+  either direction from there.
 
 ## 11. Setting everything up
 
 1. Wire the board per section 5, and check jumpers against section 3.
 2. Give the Pi a static IP on the 7I76E's subnet (section 4) and confirm
    `ping 192.168.1.121` works with the card powered.
-3. Edit `configs/axis.jsonl` and `configs/machine.json` for your hardware
+3. Edit `configs/axis.json` and `configs/machine.json` for your hardware
    (sections 7-9). Leave `inverted`/`invert_negative_limit`/
    `invert_positive_limit` `false` on a first pass -- you'll only know
    which ones you need once you see real motion.
@@ -347,11 +423,15 @@ config change.
 
 - **`motion_coordinator.py`**'s `MotionCoordinator` loads
   `MachineConfiguration` (default: `configs/machine.json` +
-  `configs/axis.jsonl`), regenerates the `.hal`/`.ini`, builds one `Axis`
+  `configs/axis.json`), regenerates the `.hal`/`.ini`, builds one `Axis`
   per configured joint, and sequences every toolpath operation through the
-  fixed safe motion order (retract Z/Y/X, rotate A, move X/Y/Z). This part
-  is not to be modified per the same constraint that protects
-  `forge_brain.py`'s HSFM.
+  fixed safe motion order (retract Z/Y/X, rotate A, move X/Y/Z). *That
+  order* is the invariant not to be casually changed, for the same reason
+  `forge_brain.py`'s HSFM shape is treated as stable -- what each retract
+  step actually *does* underneath it has changed at least once already
+  (retract-to-zero re-seeks the negative limit switch instead of a plain
+  MDI move to 0.0 -- see section 7's "Retract-to-zero" above), without
+  touching the order or the state names themselves.
 
 - **`forge_brain.py`** (untouched) only ever talks to `MotionCoordinator`
   through `self.motion.interface` (machine-wide queries/commands) and

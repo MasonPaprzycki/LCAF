@@ -92,9 +92,11 @@ def _polygon_area(points) -> float:
 
 class ToolpathSlicerTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Zero-based on every axis, matching the machine's own [0, max_travel]
-        # convention (X=0 is the clamp -- see ToolpathSlicer._x_reference /
-        # the module docstring) -- not the old symmetric-about-zero range.
+        # Zero-based on every axis, matching the machine's own
+        # [-retracted_distance, extended_distance] convention with
+        # retracted_distance=0 for X/Y/Z (X=0 is the clamp -- see
+        # ToolpathSlicer._x_reference / the module docstring) -- not the
+        # old symmetric-about-zero range.
         self.continuous_limits = MachineLimits(
             x_min_mm=0,
             x_max_mm=200,
@@ -1273,6 +1275,66 @@ class ToolpathSlicerTests(unittest.TestCase):
             box_mesh(), SliceSettings(stock_radius_mm=10, radial_segments=1), self.continuous_limits
         ).plan()
         self.assertEqual(axial_trim_allowance_mm(plan, 0, 0.0), 0.0)
+
+
+class MachineLimitsFromLcafConfigTests(unittest.TestCase):
+    """
+    MachineLimits.from_lcaf_config() reads the same retracted_distance/
+    extended_distance each JointConfiguration carries for LinuxCNC's own
+    INI generation (lcaf.utils.joint_configuration). Either may be left
+    null in axis.json to genuinely disable that end's software soft
+    limit (this project's A axis does this -- A isn't read here at all,
+    since only X/Y/Z bound the toolpath planner); this test pins down that
+    a null X/Y/Z distance is treated as unbounded here too, with a logged
+    warning, rather than crashing with a bare TypeError from float(None).
+    """
+
+    def _write_axis_json(self, path: Path, z_extended_distance) -> None:
+        def joint_entry(joint, axis, extended_distance):
+            return {
+                "joint": joint,
+                "axis": axis,
+                "motor_steps_per_revolution": 200,
+                "microsteps": 16,
+                "travel_per_motor_rev": 0.2,
+                "max_velocity": 1.0,
+                "max_acceleration": 5.0,
+                "mesa_stepgen": f"hm2_7i76e.0.stepgen.0{joint}",
+                "has_limit_switches": False,
+                "retracted_distance": 0.0,
+                "extended_distance": extended_distance,
+            }
+
+        path.write_text(
+            json.dumps([
+                joint_entry(0, "X", 4.0),
+                joint_entry(1, "Y", 2.0),
+                joint_entry(2, "Z", z_extended_distance),
+            ]),
+            encoding="utf-8",
+        )
+
+    def test_null_extended_distance_is_treated_as_unbounded_and_warns(self):
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "axis.json"
+            self._write_axis_json(path, z_extended_distance=None)
+
+            with self.assertLogs("lcaf.toolpathing.toolpath_slicer", level="WARNING"):
+                limits = MachineLimits.from_lcaf_config(path)
+
+            self.assertEqual(limits.z_extended_mm, math.inf)
+            self.assertEqual(limits.z_retracted_mm, 0.0)
+            self.assertEqual(limits.x_max_mm, 4.0 * 25.4)
+            self.assertEqual(limits.y_max_mm, 2.0 * 25.4)
+
+    def test_configured_extended_distance_is_unaffected(self):
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "axis.json"
+            self._write_axis_json(path, z_extended_distance=6.0)
+
+            limits = MachineLimits.from_lcaf_config(path)
+
+            self.assertEqual(limits.z_extended_mm, 6.0 * 25.4)
 
 
 if __name__ == "__main__":
