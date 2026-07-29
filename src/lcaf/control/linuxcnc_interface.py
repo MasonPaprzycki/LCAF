@@ -25,6 +25,15 @@ class LinuxCNCMachineInterface:
         self.status = linuxcnc.stat()
         self.error = linuxcnc.error_channel()
 
+        # hal.get_value() (used by LinuxCNCAxialInterface.min_limit_active/
+        # max_limit_active) attaches to LinuxCNC's shared-memory HAL segment
+        # lazily, on the first component created in this process -- without
+        # ever creating one, it raises "Cannot call before creating
+        # component". This component owns no pins of its own; it exists
+        # purely so hal.get_value() has something to attach through.
+        self.hal_component = hal.component("lcaf_control")
+        self.hal_component.ready()
+
         self.use_native_homing = use_native_homing
         """
         Mirrors MachineConfiguration.use_linuxcnc_native_processes (see

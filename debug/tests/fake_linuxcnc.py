@@ -128,6 +128,22 @@ class FakeLinuxCNCModule(types.ModuleType):
 
 # --- hal -----------------------------------------------------------------
 
+class FakeHALComponent:
+    """
+    Stand-in for the object hal.component(name) returns. Real HAL requires
+    ready() before the component is usable and refuses hal.get_value() calls
+    anywhere in the process until some component has been created -- see
+    LinuxCNCMachineInterface.__init__.
+    """
+
+    def __init__(self, name):
+        self.name = name
+        self._ready = False
+
+    def ready(self):
+        self._ready = True
+
+
 class FakeHALModule(types.ModuleType):
     """
     hal.get_value(pin_name) reads from a plain dict of pin name -> value
@@ -138,8 +154,15 @@ class FakeHALModule(types.ModuleType):
     def __init__(self):
         super().__init__("hal")
         self.pins: dict[str, object] = {}
+        self._component_created = False
+
+    def component(self, name):
+        self._component_created = True
+        return FakeHALComponent(name)
 
     def get_value(self, pin_name):
+        if not self._component_created:
+            raise RuntimeError("Cannot call before creating component")
         return self.pins.get(pin_name, False)
 
 
