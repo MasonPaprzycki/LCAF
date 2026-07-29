@@ -961,7 +961,19 @@ def generate_ini(machine: MachineConfiguration) -> str:
             home_search_vel = 0.0
             home_latch_vel = 0.0
             home_ignore_limits = "NO"
-            home_sequence = -1
+            # Must be non-negative. A *negative* HOME_SEQUENCE marks a joint
+            # as part of a "synchronized" homing group, and LinuxCNC's task
+            # controller then refuses joint-mode jogging on that joint until
+            # it reports homed -- regardless of NO_FORCE_HOMING (that only
+            # gates MDI/program-run, not jogging). This project's own
+            # software homing (_jog_toward_limit_switch) *is* a joint-mode
+            # jog, issued before LinuxCNC ever sees this joint as homed, so a
+            # negative value here would make LinuxCNC silently refuse every
+            # homing/retract jog this project issues. 0 for every joint is a
+            # neutral, unsynchronized, independent-homing value -- harmless
+            # since use_linuxcnc_native_processes=False also means LinuxCNC's
+            # own native homing sequence never actually runs (see above).
+            home_sequence = 0
 
         # LinuxCNC's own documented behavior for an omitted MIN_LIMIT/
         # MAX_LIMIT is to substitute -1e99/1e99 (see the [JOINT_n]/[AXIS_x]
