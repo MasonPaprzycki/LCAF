@@ -6,6 +6,22 @@ import hal
 import time
 
 
+# How tightly _seek_limit_switch() re-issues command.override_limits() while
+# deliberately jogging into a limit switch during software homing/retract --
+# see that method's docstring for why this can't just be called once per
+# this project's own ~20-50 Hz control-loop heartbeat. 1ms roughly matches a
+# typical LinuxCNC servo-thread period (see MachineConfiguration.
+# servo_period_ns), which is the rate LinuxCNC's own realtime side
+# re-checks each joint's hard-limit HAL pin.
+_OVERRIDE_LIMITS_POLL_INTERVAL_S = 0.001
+
+# Upper bound on time spent inside one _seek_limit_switch() call before
+# returning control to the caller's own heartbeat -- keeps this a bounded
+# tight-poll, not an unbounded block, while still being far more frequent
+# than the ~20-50ms an outer heartbeat alone would provide.
+_OVERRIDE_LIMITS_POLL_BUDGET_S = 0.05
+
+
 class LinuxCNCMachineInterface:
     """
     Single shared connection to a running LinuxCNC instance.
@@ -395,16 +411,12 @@ class LinuxCNCAxialInterface:
             return False
 
         if self._homing_phase == "software_seek_min":
-            # Re-armed every heartbeat, not just once in _jog_toward_limit_switch():
-            # LinuxCNC clears an override as soon as the joint next reports
-            # "in position" (see override_limits() docstring), and this
-            # project has no way to confirm from here exactly when the jog
-            # actually leaves that state. Calling it again here is a no-op
-            # if it's already armed, and guarantees it's still armed at the
-            # instant min_limit_active() actually goes true below.
-            self.command.override_limits()
-
-            if self.min_limit_active():
+            # _seek_limit_switch() tightly re-arms override_limits() well
+            # above this heartbeat's own rate -- see its docstring for why a
+            # single override_limits()+check per heartbeat isn't tight
+            # enough to reliably catch the switch before LinuxCNC's own
+            # realtime side faults on it first.
+            if self._seek_limit_switch(self.min_limit_active):
                 self.soft_stop()
                 self.position_offset_to_native = self.get_linuxcnc_native_position()
 
@@ -431,9 +443,7 @@ class LinuxCNCAxialInterface:
 
         if self._homing_phase == "software_seek_max":
             # See the matching comment in the software_seek_min branch above.
-            self.command.override_limits()
-
-            if self.max_limit_active():
+            if self._seek_limit_switch(self.max_limit_active):
                 self.soft_stop()
                 self._set_homed_limits(measured_max_native=self.get_position())
                 self.axis_homed = True
@@ -599,11 +609,10 @@ class LinuxCNCAxialInterface:
             return False
 
         if self._retract_phase == "software_seek_min":
-            # Re-armed every heartbeat -- see the matching comment in
-            # poll_homing()'s software_seek_min branch.
-            self.command.override_limits()
-
-            if self.min_limit_active():
+            # _seek_limit_switch() -- see poll_homing()'s software_seek_min
+            # branch and _seek_limit_switch()'s own docstring for why this
+            # can't be a single override_limits()+check per heartbeat.
+            if self._seek_limit_switch(self.min_limit_active):
                 self.soft_stop()
                 self.position_offset_to_native = self.get_linuxcnc_native_position()
                 self._retract_phase = None
@@ -761,12 +770,67 @@ class LinuxCNCAxialInterface:
         a stop), at which point LinuxCNC re-arms it automatically. Native
         homing (use_linuxcnc_native_processes=True) never calls this method,
         since it doesn't need it -- see start_homing().
+
+        override_limits() itself is reactive, not preventive: LinuxCNC
+        rebuilds its internal overrideLimitMask from whichever joints are
+        CURRENTLY on a limit switch at the exact instant the command is
+        processed -- calling it before the switch trips protects nothing,
+        since this joint isn't in that snapshot yet. See _seek_limit_switch(),
+        which polling callers (poll_homing()/poll_retract_to_zero()) use
+        instead of a single override_limits()+check per heartbeat, for why
+        that matters here.
         """
         self.command.override_limits()
         if positive:
             self.jog_positive(self._homing_speed)
         else:
             self.jog_negative(self._homing_speed)
+
+    def _seek_limit_switch(self, limit_check) -> bool:
+        """
+        Tightly re-issue command.override_limits() and poll limit_check()
+        (min_limit_active/max_limit_active) for up to
+        _OVERRIDE_LIMITS_POLL_BUDGET_S, at _OVERRIDE_LIMITS_POLL_INTERVAL_S
+        intervals. Returns True the instant limit_check() reports the switch
+        active; False if the whole budget elapses first (the caller's own
+        timeout still applies across repeated calls -- this bound is only
+        about shrinking the race window within a single call).
+
+        Why this exists instead of one override_limits()+check per
+        poll_homing()/poll_retract_to_zero() heartbeat (this project's
+        control loop runs at ~20-50ms per tick -- see Controller.rate):
+        LinuxCNC's realtime motion loop re-checks each joint's hard-limit
+        HAL pin every servo cycle (~1ms -- see MachineConfiguration.
+        servo_period_ns) completely independently of this Python process,
+        and faults + disables every joint's amp-enable-out machine-wide
+        (with no automatic recovery -- see docs/potential_issues.md) the
+        very first cycle it sees the pin active without this joint already
+        in LinuxCNC's override snapshot (see _jog_toward_limit_switch()'s
+        docstring). A physical switch can trip at any point within one of
+        this process's own heartbeats, so calling override_limits() only
+        once per heartbeat leaves a real window -- up to that whole
+        heartbeat's width -- where the switch can trip and LinuxCNC's
+        realtime side can already fault on it before this process's next
+        tick even gets a chance to react. Polling at ~1ms instead shrinks
+        that window down to roughly LinuxCNC's own servo-cycle granularity,
+        which is as tight as a Python-side NML client can practically get
+        without a change inside LinuxCNC itself. This is a deliberate,
+        bounded exception to this class's usual non-blocking polling
+        design (see poll_homing()'s docstring) -- the alternative is
+        leaving this race in place, which reliably faults the whole machine
+        given enough homing attempts.
+        """
+        deadline = time.monotonic() + _OVERRIDE_LIMITS_POLL_BUDGET_S
+
+        while time.monotonic() < deadline:
+            self.command.override_limits()
+
+            if limit_check():
+                return True
+
+            time.sleep(_OVERRIDE_LIMITS_POLL_INTERVAL_S)
+
+        return False
 
     def is_idle(self, velocity_tolerance: float = 1e-6):
         self.poll()

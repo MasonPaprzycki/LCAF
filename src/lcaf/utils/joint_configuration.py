@@ -958,7 +958,6 @@ def generate_ini(machine: MachineConfiguration) -> str:
                 # homing -- see LinuxCNCAxialInterface).
                 home_search_vel = -abs(vel) * _NATIVE_HOME_SEARCH_VEL_FRACTION
                 home_latch_vel = abs(vel) * _NATIVE_HOME_LATCH_VEL_FRACTION
-                home_ignore_limits = "YES"
             else:
                 # Switchless joint (A): HOME_SEARCH_VEL=0 tells LinuxCNC to
                 # treat wherever it currently is as home, with no seek move
@@ -966,7 +965,6 @@ def generate_ini(machine: MachineConfiguration) -> str:
                 # software zero-at-boot homing.
                 home_search_vel = 0.0
                 home_latch_vel = 0.0
-                home_ignore_limits = "NO"
             # HOME_SEQUENCE < 0 in axis.json means "no explicit sequence
             # requested" -- default to this joint's own number, so "Home
             # All" homes joints one at a time in joint-number order.
@@ -974,7 +972,6 @@ def generate_ini(machine: MachineConfiguration) -> str:
         else:
             home_search_vel = 0.0
             home_latch_vel = 0.0
-            home_ignore_limits = "NO"
             # Must be non-negative. A *negative* HOME_SEQUENCE marks a joint
             # as part of a "synchronized" homing group, and LinuxCNC's task
             # controller then refuses joint-mode jogging on that joint until
@@ -988,6 +985,15 @@ def generate_ini(machine: MachineConfiguration) -> str:
             # since use_linuxcnc_native_processes=False also means LinuxCNC's
             # own native homing sequence never actually runs (see above).
             home_sequence = 0
+
+        # Always YES, for every joint, in both homing modes. Native mode
+        # needs it so a switched joint's own home-seek can drive into its
+        # negative limit switch without LinuxCNC's homing state machine
+        # faulting on it. Under this project's own software homing, native
+        # homing never runs at all, so this setting has no effect there one
+        # way or the other -- it's set uniformly rather than conditionally
+        # so the INI doesn't imply a per-mode distinction that isn't real.
+        home_ignore_limits = "YES"
 
         # LinuxCNC's own documented behavior for an omitted MIN_LIMIT/
         # MAX_LIMIT is to substitute -1e99/1e99 (see the [JOINT_n]/[AXIS_x]
