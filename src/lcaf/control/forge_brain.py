@@ -351,7 +351,14 @@ class ForgeBrain:
                 )
                 return
 
-        if not interface.all_homed():
+        # motion.all_homed() (not interface.all_homed()) -- home_all() now
+        # homes and retracts one axis at a time, and the last axis in that
+        # sequence reports raw is_homed() True before its own retract has
+        # even started. interface.all_homed() only reflects that raw
+        # per-axis flag, so it would (briefly) read True one retract early;
+        # motion.all_homed() tracks the whole sequential home+retract
+        # sequence instead -- see MotionCoordinator.home_all().
+        if not self.motion.all_homed():
 
             faulted_axis = self.motion.first_faulted_axis()
             if faulted_axis is not None:

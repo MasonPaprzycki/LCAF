@@ -107,6 +107,16 @@ class JointConfiguration:
         hm2_7i76e.0.stepgen.00
     """
 
+    gear_ratio: float = 1.0
+    """
+    Additional reduction between the motor shaft and travel_per_motor_rev's
+    own reference point, e.g. a belt/gearbox stage external to whatever
+    travel_per_motor_rev already accounts for. Multiplies steps_per_unit
+    directly -- a gear_ratio of 10 means 10x as many motor steps are needed
+    per unit of joint travel as travel_per_motor_rev alone would imply. 1.0
+    (default) means no additional reduction.
+    """
+
     enable_output: str | None = None
     """Field output pin wired to the driver's enable input, e.g.
     hm2_7i76e.0.7i76.0.0.output-00. None if this joint's driver is always
@@ -287,6 +297,9 @@ class JointConfiguration:
         if self.travel_per_motor_rev <= 0:
             raise ValueError("travel_per_motor_rev must be positive.")
 
+        if self.gear_ratio <= 0:
+            raise ValueError("gear_ratio must be positive.")
+
         if self.max_velocity <= 0:
             raise ValueError("max_velocity must be positive.")
 
@@ -364,6 +377,7 @@ class JointConfiguration:
             self.motor_steps_per_revolution
             * self.microsteps
             / self.travel_per_motor_rev
+            * self.gear_ratio
         )
 
     @property

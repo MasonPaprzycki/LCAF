@@ -28,7 +28,7 @@
         "motor_steps_per_revolution": 200,
         "microsteps": 16,
         "travel_per_motor_rev": 0.19685,
-        "max_velocity": 0.5,
+        "max_velocity": 4,
         "max_acceleration": 8,
         "mesa_stepgen": "hm2_7i76e.0.stepgen.01",
         "enable_output": "hm2_7i76e.0.7i76.0.0.output-01",
@@ -66,7 +66,9 @@
         "invert_positive_limit": false,
         "home_sequence": 2,
         "retracted_distance": 0.25,
-        "extended_distance": 3.5
+        "extended_distance": 3.5,
+        "gear_ratio": 10
+
     },
     {
         "joint": 3,

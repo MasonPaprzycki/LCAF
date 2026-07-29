@@ -112,5 +112,86 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
         self.assertEqual(self.motion.axes["z"].status.state, AxisState.FAULT)
 
 
+class SequentialHomingTests(unittest.TestCase):
+    """
+    home_all() must home and retract exactly one axis at a time (joint 0,
+    1, 2, 3 in order -- here x, y, z, a) rather than driving every joint
+    into its limit switch concurrently -- see
+    MotionCoordinator.home_all()'s docstring for why concurrent homing lets
+    one joint's switch trip clear LinuxCNC's machine-wide
+    command.override_limits() out from under a still-seeking joint,
+    disabling every joint's amp-enable-out mid-sequence. A's has_limit_switches=False
+    (configs/axis.json) means it must be skipped straight to "done" with no
+    retract attempt (start_retract_to_zero() refuses a switchless joint
+    outright).
+    """
+
+    def setUp(self):
+        self.fake_hal = sys.modules["hal"]
+        self.fake_hal.pins.clear()
+
+        self.machine_config = load_machine_configuration(REPO_ROOT / "configs" / "machine.json")
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.motion = MotionCoordinator(
+            machine_config=self.machine_config,
+            generated_config_dir=self._tmpdir.name,
+        )
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def neg_pin(self, axis_name: str) -> str:
+        return self.motion.axes[axis_name].axial_interface.joint.negative_limit_hal_pin
+
+    def trip_negative_switch_and_settle(self, axis_name: str):
+        """One poll() to issue the jog, one with the switch pin set to let it land."""
+        self.motion.poll()
+        self.fake_hal.pins[self.neg_pin(axis_name)] = True
+        self.motion.poll()
+
+    def test_axes_home_one_at_a_time_in_joint_order(self):
+        self.motion.home_all()
+
+        for axis_name in ("x", "y", "z"):
+            for other in self.motion.axes:
+                if other != axis_name and not self.motion.axes[other].is_homed():
+                    self.assertNotEqual(
+                        self.motion.axes[other].status.state,
+                        AxisState.HOMING,
+                        f"{other} should not be homing while {axis_name} is still in progress",
+                    )
+
+            self.trip_negative_switch_and_settle(axis_name)
+            self.assertTrue(self.motion.axes[axis_name].is_homed())
+
+            # Immediately retracted -- not deferred until every axis homes.
+            self.trip_negative_switch_and_settle(axis_name)
+            self.assertTrue(self.motion.axes[axis_name].is_retracted())
+
+            self.fake_hal.pins.clear()
+
+        # A is switchless -- homes instantly, no retract attempted or needed.
+        self.motion.poll()
+        self.assertTrue(self.motion.axes["a"].is_homed())
+        self.assertFalse(self.motion.axes["a"].has_fault())
+
+        self.assertTrue(self.motion.all_homed())
+
+    def test_all_homed_false_until_last_axis_retracts(self):
+        self.motion.home_all()
+
+        for axis_name in ("x", "y", "z"):
+            self.trip_negative_switch_and_settle(axis_name)
+            self.trip_negative_switch_and_settle(axis_name)
+            self.fake_hal.pins.clear()
+            self.assertFalse(self.motion.all_homed())
+
+        # A reports is_homed() instantly, but all_homed() must not flip True
+        # off that raw per-axis flag alone (see MotionCoordinator.all_homed()).
+        self.motion.poll()
+        self.assertTrue(self.motion.axes["a"].is_homed())
+        self.assertTrue(self.motion.all_homed())
+
+
 if __name__ == "__main__":
     unittest.main()

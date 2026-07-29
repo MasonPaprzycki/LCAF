@@ -94,7 +94,7 @@ class Axis:
                 return
 
             if not self.axial_interface.has_homing_ever_been_intialized():
-                self.axial_interface.start_homing()
+                self.axial_interface.start_homing(speed=self.axial_interface.joint.max_velocity)
                 return
 
             try:
@@ -109,7 +109,9 @@ class Axis:
         elif self.status.state == AxisState.RETRACTING:
             try:
                 if not self._retract_command_issued:
-                    self.axial_interface.start_retract_to_zero()
+                    self.axial_interface.start_retract_to_zero(
+                        speed=self.axial_interface.joint.max_velocity
+                    )
                     self._retract_command_issued = True
                     return
 
