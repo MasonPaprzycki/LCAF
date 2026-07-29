@@ -672,14 +672,24 @@ class LinuxCNCAxialInterface:
         configured retracted_distance/extended_distance
         (JointConfiguration.min_travel is -retracted_distance -- see its
         docstring).
-        """
-        assert self.joint.retracted_distance is not None
-        assert self.joint.extended_distance is not None
 
-        self.min_limit["native"] = self.joint.min_travel
-        self.max_limit["native"] = (
-            measured_max_native if measured_max_native is not None else self.joint.extended_distance
+        retracted_distance/extended_distance may be None -- a joint with a
+        genuinely disabled soft limit on that end (this project's switchless
+        A joint disables both -- see JointConfiguration.retracted_distance/
+        extended_distance). Mirrors generate_ini()'s own handling of the
+        same None: LinuxCNC's documented substitute for an omitted
+        MIN_LIMIT/MAX_LIMIT is -1e99/1e99, so this uses the same sentinels
+        rather than asserting a value that was deliberately left unset.
+        """
+        self.min_limit["native"] = (
+            self.joint.min_travel if self.joint.retracted_distance is not None else -1e99
         )
+        if measured_max_native is not None:
+            self.max_limit["native"] = measured_max_native
+        elif self.joint.extended_distance is not None:
+            self.max_limit["native"] = self.joint.extended_distance
+        else:
+            self.max_limit["native"] = 1e99
         if not self.joint.is_angular:
             self.min_limit["mm"] = self.min_limit["native"] * 25.4
             self.max_limit["mm"] = self.max_limit["native"] * 25.4
