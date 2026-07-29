@@ -171,7 +171,7 @@ class LinuxCNCAxialInterface:
         self._homing_phase: str | None = None
         self._homing_start_time: float = 0.0
         self._homing_speed: float = 0.0
-        self._homing_timeout: float = 30.0
+        self._homing_timeout: float = 60.0
 
         # Retract-to-zero phase state -- see start_retract_to_zero()/
         # poll_retract_to_zero() below. Separate from _homing_phase (and
@@ -314,7 +314,7 @@ class LinuxCNCAxialInterface:
         return self.status.joint_position[self.joint.joint]
 
     # homing
-    def start_homing(self, speed: float = 0.03937, timeout: float = 30.0):
+    def start_homing(self, speed: float = 0.03937, timeout: float = 60.0):
         """
         Begin homing without blocking. Dispatches to native or software
         homing depending on self.machine.use_native_homing (mirrors
@@ -473,7 +473,7 @@ class LinuxCNCAxialInterface:
     def is_retract_in_progress(self) -> bool:
         return self._retract_phase is not None
 
-    def start_retract_to_zero(self, speed: float = 0.03937, timeout: float = 30.0):
+    def start_retract_to_zero(self, speed: float = 0.03937, timeout: float = 60.0):
         """
         Begin retracting this joint -- for almost every joint that means
         re-seeking the negative limit switch to re-establish zero, without
