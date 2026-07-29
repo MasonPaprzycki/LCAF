@@ -33,19 +33,23 @@ class JointConfiguration:
     other. docs/hardware_setup.md has a units table spelling this out
     per-field if you're ever unsure.
 
-    Every joint's usable range is [-retracted_distance, extended_distance]
-    in its native unit -- two independent, always-positive distances
-    measured from the joint's own zero position (see retracted_distance/
-    extended_distance below), regardless of whether that zero comes from a
-    physical limit switch or not:
+    Every joint's usable range is [retracted_distance, extended_distance] in
+    its native unit -- two always-positive positions measured from the
+    joint's own zero (see retracted_distance/extended_distance below),
+    regardless of whether that zero comes from a physical limit switch or
+    not:
     A switched joint (has_limit_switches=True; X/Y/Z here) has 0 wherever
     LinuxCNCAxialInterface.start_homing()/poll_homing() finds the negative
     limit switch at homing time, regardless of the physical machine's
-    absolute position -- retracted_distance is normally 0 for these (the
-    switch itself is the retracted end of travel).
+    absolute position. The switch itself sits at 0 -- retracted_distance is
+    NOT how far past the switch travel is allowed; it's the standoff
+    position homing immediately backs the joint off to once the switch is
+    found (so normal operation never sits on, or re-triggers, the switch),
+    and it doubles as this end's own soft limit floor.
     The switchless angular joint (has_limit_switches=False, is_angular=True;
     A here) instead has 0 wherever it happened to be sitting at power-on,
-    since it has no reference switch to seek, and it is free to rotate
+    since it has no reference switch to seek (and so nothing to back off
+    from either -- see retracted_distance below), and it is free to rotate
     either direction from there since this project's A joint has no
     cable-wrap constraint. See docs/hardware_setup.md.
 
@@ -188,7 +192,7 @@ class JointConfiguration:
 
     None (default) for every other joint -- retract behaves as always,
     re-seeking the negative limit switch. When set, must fall within
-    [-retracted_distance, extended_distance] if those are configured (see
+    [retracted_distance, extended_distance] if those are configured (see
     __post_init__).
     """
 
@@ -220,36 +224,42 @@ class JointConfiguration:
     # semantics).
     home_sequence: int = -1
 
-    # Software travel limits. When set, both are always-positive distances,
+    # Software travel limits. When set, both are always-positive positions,
     # in this joint's own native unit (inches for linear, degrees for
     # angular), measured from its own zero position (see the class
     # docstring) -- the joint's soft-limited range is always
-    # [-retracted_distance, extended_distance]. Normally set for every
-    # joint (generate_ini() uses them, regardless of has_limit_switches, as
-    # the INI's MIN_LIMIT/MAX_LIMIT -- see generate_ini()); either may be
-    # left None instead to genuinely disable that end's software limit
-    # (this project's A joint does this for both -- see below), in which
-    # case generate_ini() omits that entry rather than inventing a
+    # [retracted_distance, extended_distance]. Normally set for every
+    # switched joint (generate_ini() uses them, as the INI's
+    # MIN_LIMIT/MAX_LIMIT -- see generate_ini()); either may be left None
+    # instead to genuinely disable that end's software limit (this
+    # project's switchless A joint does this for both -- see below), in
+    # which case generate_ini() omits that entry rather than inventing a
     # placeholder, matching LinuxCNC's own "no limit" semantics.
-    #   - A switched linear joint (X/Y/Z): retracted_distance is normally 0
-    #     -- 0 is wherever LinuxCNC's own native homing lands (see
-    #     LinuxCNCAxialInterface.start_homing/poll_homing), and that switch
-    #     is the physical retracted end of travel too. extended_distance is
-    #     the static envelope LinuxCNC's INI soft limits use -- native
-    #     homing never remeasures it, regardless of dual_limit_switches (see
-    #     that field's docstring).
+    #   - A switched linear joint (X/Y/Z): 0 is wherever LinuxCNC's own
+    #     native homing finds the negative limit switch (see
+    #     LinuxCNCAxialInterface.start_homing/poll_homing) -- immediately
+    #     after which the joint backs off to retracted_distance, its
+    #     standoff/parked position and this end's soft-limit floor, rather
+    #     than sitting on the switch. extended_distance is the static
+    #     envelope LinuxCNC's INI soft limits use -- native homing never
+    #     remeasures it, regardless of dual_limit_switches (see that
+    #     field's docstring).
     #   - The switchless angular joint (A): 0 is simply wherever it was
     #     sitting when it powered on (there is no reference switch to
-    #     seek), and since this project has no cable-wrap constraint on A,
-    #     it is free to rotate either direction from there with genuinely
-    #     no travel limit -- so both are left None rather than carrying an
-    #     arbitrary large sentinel value.
+    #     seek, so nothing to back off from either), and since this project
+    #     has no cable-wrap constraint on A, it is free to rotate either
+    #     direction from there with genuinely no travel limit -- so both
+    #     are left None rather than carrying an arbitrary large sentinel
+    #     value.
     retracted_distance: float | None = None
-    """Positive distance from zero to this joint's retracted (negative-
-    direction) soft limit, in inches (linear) or degrees (angular), or None
-    to disable this joint's negative-direction soft limit entirely (logs a
-    warning -- see __post_init__). Becomes -retracted_distance in the
-    generated INI's MIN_LIMIT when set -- see min_travel."""
+    """Positive position this joint backs off to immediately after LinuxCNC's
+    native homing finds its negative limit switch (which sits at 0) -- its
+    standoff/parked position, and this end's soft-limit floor (normal
+    operation never commands this joint below it, so the switch is never
+    re-triggered in normal use). None disables this end's soft limit
+    entirely (logs a warning -- see __post_init__); generate_ini() then
+    omits MIN_LIMIT and no backoff move happens after homing. Becomes the
+    generated INI's MIN_LIMIT directly when set -- see min_travel."""
 
     extended_distance: float | None = None
     """Positive distance from zero to this joint's extended (positive-
@@ -297,7 +307,7 @@ class JointConfiguration:
         if self.retracted_distance is not None and self.retracted_distance < 0:
             raise ValueError(
                 f"Joint {self.joint} ({self.axis}): retracted_distance must not be negative "
-                "(it is a positive distance from zero -- see its docstring)."
+                "(it is a positive position from zero -- see its docstring)."
             )
 
         if self.extended_distance is not None and self.extended_distance <= 0:
@@ -306,12 +316,25 @@ class JointConfiguration:
                 "(it is a positive distance from zero -- see its docstring)."
             )
 
+        if (
+            self.retracted_distance is not None
+            and self.extended_distance is not None
+            and self.retracted_distance >= self.extended_distance
+        ):
+            raise ValueError(
+                f"Joint {self.joint} ({self.axis}): retracted_distance "
+                f"({self.retracted_distance}) must be less than extended_distance "
+                f"({self.extended_distance}) -- the usable range "
+                "[retracted_distance, extended_distance] would otherwise be empty or inverted."
+            )
+
         if self.retracted_distance is None:
             _logger.warning(
                 f"Joint {self.joint} ({self.axis}): retracted_distance is None -- this joint's "
                 "negative-direction software soft limit is disabled (generate_ini() will omit "
-                "MIN_LIMIT, and LinuxCNC itself defaults that to -1e99). Only a physical limit "
-                "switch or mechanical stop protects this end of travel now."
+                "MIN_LIMIT, and LinuxCNC itself defaults that to -1e99), and it will not back "
+                "off from its negative limit switch after homing. Only a physical limit switch "
+                "or mechanical stop protects this end of travel now."
             )
 
         if self.extended_distance is None:
@@ -323,10 +346,10 @@ class JointConfiguration:
             )
 
         if self.retract_to is not None:
-            if self.retracted_distance is not None and self.retract_to < -self.retracted_distance:
+            if self.retracted_distance is not None and self.retract_to < self.retracted_distance:
                 raise ValueError(
                     f"Joint {self.joint} ({self.axis}): retract_to ({self.retract_to}) is beyond "
-                    f"this joint's retracted-direction soft limit (-{self.retracted_distance})."
+                    f"this joint's retracted-direction soft limit ({self.retracted_distance})."
                 )
             if self.extended_distance is not None and self.retract_to > self.extended_distance:
                 raise ValueError(
@@ -404,12 +427,10 @@ class JointConfiguration:
 
     @property
     def min_travel(self) -> float | None:
-        """The INI MIN_LIMIT for this joint: -retracted_distance, or None if
-        retracted_distance is not configured (generate_ini() then omits
-        MIN_LIMIT -- see retracted_distance's docstring)."""
-        if self.retracted_distance is None:
-            return None
-        return -self.retracted_distance
+        """The INI MIN_LIMIT for this joint: retracted_distance directly, or
+        None if retracted_distance is not configured (generate_ini() then
+        omits MIN_LIMIT -- see retracted_distance's docstring)."""
+        return self.retracted_distance
 
     @classmethod
     def from_dict(cls, data: dict) -> "JointConfiguration":
@@ -609,11 +630,11 @@ def _inverted_input_pin(pin: str) -> str:
     return f"{pin}-not"
 
 
-#  How close a simulated joint's looped-back position has to get to its
-#  ideal min_travel / extended_distance before generate_hal(simulate=True)'s
-#  fake limit switches trip. Arbitrary -- there is no real switch involved,
-#  this only needs to be small relative to a joint's own travel and bigger
-#  than floating-point noise.
+#  How close a simulated joint's looped-back position has to get to 0 (the
+#  negative switch) / extended_distance (the positive switch) before
+#  generate_hal(simulate=True)'s fake limit switches trip. Arbitrary --
+#  there is no real switch involved, this only needs to be small relative
+#  to a joint's own travel and bigger than floating-point noise.
 _SIM_LIMIT_SWITCH_HYSTERESIS = 0.01
 
 
@@ -705,12 +726,6 @@ def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
             emit(f"net {pos_signal} {joint.motor_position_command_pin} => {joint.motor_position_feedback_pin}")
 
             if joint.has_limit_switches:
-                if joint.retracted_distance is None:
-                    raise ValueError(
-                        f"Joint {joint.joint} ({joint.axis}): retracted_distance is None -- "
-                        "generate_hal(simulate=True) needs a concrete retracted_distance to "
-                        "build this joint's simulated negative limit switch position."
-                    )
                 if joint.dual_limit_switches and joint.extended_distance is None:
                     raise ValueError(
                         f"Joint {joint.joint} ({joint.axis}): extended_distance is None -- "
@@ -723,10 +738,10 @@ def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
 
                 # comp.out is TRUE when in1 > in0 (with hysteresis) -- see
                 # https://linuxcnc.org/docs/2.9/html/man/man9/comp.9.html.
-                # Negative switch: trips once position drops below ~min_travel
-                # (in0 = live position, in1 = the near-min_travel threshold --
-                # normally ~0, since retracted_distance is normally 0 for a
-                # switched joint).
+                # Negative switch: trips once position drops below ~0 -- the
+                # switch is always physically at 0 regardless of
+                # retracted_distance (in0 = live position, in1 = the
+                # near-zero threshold).
                 # Positive switch (dual_limit_switches only -- mirrors
                 # whether positive_limit_input is actually wired on real
                 # hardware): trips once position rises above
@@ -740,7 +755,7 @@ def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
                 else:
                     emit(f"net {pos_signal} => {neg_comp}.in0")
 
-                emit(f"setp {neg_comp}.in1 {round(joint.min_travel + hyst, 6)}")
+                emit(f"setp {neg_comp}.in1 {round(hyst, 6)}")
                 emit(f"setp {neg_comp}.hyst {hyst}")
 
                 neg_signal = f"{joint.axis.lower()}-neg-lim"

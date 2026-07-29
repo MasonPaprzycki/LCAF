@@ -44,13 +44,18 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def advance_retract(self, axis_name: str):
-        """Drive one axis's RETRACTING state to completion via its own poll()
-        (native retract-to-zero re-runs command.home() -- see
-        LinuxCNCAxialInterface.start_retract_to_zero())."""
+        """Drive one axis's RETRACTING state to completion via its own
+        poll() (native retract-to-zero re-runs command.home(), then backs
+        off to retracted_distance -- see
+        LinuxCNCAxialInterface.start_retract_to_zero()/
+        _start_backoff_from_switch()). The fake stat's 'inpos' defaults
+        True, so the backoff move completes on the poll() right after it's
+        issued -- no explicit position bookkeeping needed."""
         joint_num = self.motion.axes[axis_name].joint
-        self.motion.axes[axis_name].poll()
+        self.motion.axes[axis_name].poll()  # issues command.home() for retract
         self.stat.joint[joint_num]["homed"] = True
-        self.motion.axes[axis_name].poll()
+        self.motion.axes[axis_name].poll()  # observes homed -> issues backoff move
+        self.motion.axes[axis_name].poll()  # observes in-position -> retract complete
 
     def start_operation(self) -> ToolpathOperation:
         operation = ToolpathOperation(
@@ -112,18 +117,20 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
         self.assertEqual(self.motion.axes["z"].status.state, AxisState.FAULT)
 
 
-class SequentialHomingTests(unittest.TestCase):
+class ConcurrentHomingTests(unittest.TestCase):
     """
-    home_all() must home and retract exactly one axis at a time (joint 0,
-    1, 2, 3 in order -- here x, y, z, a), immediately retracting each axis
-    once it homes rather than deferring every retract until the whole
-    machine has homed -- see MotionCoordinator.home_all()'s docstring. A's
-    has_limit_switches=False (configs/axis.json) means it must be skipped
-    straight to "done" with no retract attempt (start_retract_to_zero()
-    refuses a switchless joint outright).
+    home_all() must home X, Y, and Z (and A) all at the same time, not one
+    at a time -- LinuxCNC's own native homing per joint is independent and
+    safe to run concurrently (HOME_IGNORE_LIMITS is evaluated inside
+    LinuxCNC's own compiled homing state machine, per joint, not a shared
+    reactive mechanism -- see MotionCoordinator.home_all()'s docstring).
+    Each axis then backs off to its own configured retracted_distance
+    immediately once its own homing completes
+    (LinuxCNCAxialInterface.poll_homing()/_start_backoff_from_switch()),
+    fully independently of the other axes -- not gated on any of them.
     """
 
-    _MAX_TICKS_PER_AXIS = 8
+    _MAX_TICKS = 8
 
     def setUp(self):
         self.fake_linuxcnc = sys.modules["linuxcnc"]
@@ -135,73 +142,70 @@ class SequentialHomingTests(unittest.TestCase):
             generated_config_dir=self._tmpdir.name,
         )
         self.stat = self.fake_linuxcnc._last_stat
+        self.command = self.fake_linuxcnc._last_command
 
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    def run_axis_to_completion(self, axis_name: str):
+    def run_all_axes_to_completion(self):
         """
-        Poll axis_name's native homing (then, for a switched joint, its
-        native retract-to-zero) to completion, feeding the fake stat's
-        'homed' flag whenever this project has a fresh command.home() in
-        flight for it (LinuxCNCAxialInterface's own _homing_phase/
-        _retract_phase == "native_wait") and clearing it otherwise, so each
-        fresh command.home() is genuinely observed as not-yet-complete
-        before completing it -- mirrors what real LinuxCNC reports while a
-        home sequence is actually in progress.
+        Poll every axis's native homing (then backoff) to completion in
+        lockstep -- feeding each joint's own fake 'homed' flag whenever its
+        own axial_interface reports a fresh command.home() in flight
+        (_homing_phase == "native_wait"), so all four progress together
+        rather than one waiting on another. The fake stat's 'inpos'
+        defaults True, so each backoff move completes on the poll() right
+        after it's issued.
         """
-        axis = self.motion.axes[axis_name]
-        joint_num = axis.joint
-
-        for _ in range(self._MAX_TICKS_PER_AXIS):
-            axial = axis.axial_interface
-            if axial._homing_phase == "native_wait" or axial._retract_phase == "native_wait":
-                self.stat.joint[joint_num]["homed"] = True
-            else:
-                self.stat.joint[joint_num]["homed"] = False
+        for _ in range(self._MAX_TICKS):
+            for axis in self.motion.axes.values():
+                joint_num = axis.joint
+                if axis.axial_interface._homing_phase == "native_wait":
+                    self.stat.joint[joint_num]["homed"] = True
+                else:
+                    self.stat.joint[joint_num]["homed"] = False
 
             self.motion.poll()
 
-            if axis.is_homed() and (not axial.joint.has_limit_switches or axis.is_retracted()):
+            if all(axis.is_homed() for axis in self.motion.axes.values()):
+                # One more poll() so each Axis's own status.state (checked
+                # at the top of Axis.poll(), before poll_homing() updates
+                # axis_homed) has a chance to catch up to HOMING -> READY.
+                self.motion.poll()
                 return
 
-        self.fail(f"{axis_name} did not finish homing/retracting within {self._MAX_TICKS_PER_AXIS} ticks")
+        self.fail(f"not every axis finished homing within {self._MAX_TICKS} ticks")
 
-    def test_axes_home_one_at_a_time_in_joint_order(self):
+    def test_home_all_issues_command_home_for_every_axis_in_one_poll(self):
         self.motion.home_all()
 
+        for axis_name in ("x", "y", "z", "a"):
+            self.assertEqual(self.motion.axes[axis_name].status.state, AxisState.HOMING)
+
+        # A single poll() must start every axis's own command.home() at
+        # once -- none deferred until another axis finishes.
+        self.motion.poll()
+
+        home_calls = [c for c in self.command.calls if c[0] == "home"]
+        homed_joints = {c[1] for c in home_calls}
+        expected_joints = {self.motion.axes[name].joint for name in ("x", "y", "z", "a")}
+        self.assertEqual(homed_joints, expected_joints)
+
+        for axis_name in ("x", "y", "z", "a"):
+            self.assertEqual(self.motion.axes[axis_name].axial_interface._homing_phase, "native_wait")
+
+    def test_all_axes_home_and_back_off_concurrently(self):
+        self.motion.home_all()
+        self.run_all_axes_to_completion()
+
         for axis_name in ("x", "y", "z"):
-            for other in self.motion.axes:
-                if other != axis_name and not self.motion.axes[other].is_homed():
-                    self.assertNotEqual(
-                        self.motion.axes[other].status.state,
-                        AxisState.HOMING,
-                        f"{other} should not be homing while {axis_name} is still in progress",
-                    )
-
-            self.run_axis_to_completion(axis_name)
             self.assertTrue(self.motion.axes[axis_name].is_homed())
-            # Immediately retracted -- not deferred until every axis homes.
-            self.assertTrue(self.motion.axes[axis_name].is_retracted())
+            self.assertEqual(self.motion.axes[axis_name].status.state, AxisState.READY)
 
-        # A is switchless -- homes instantly, no retract attempted or needed.
-        self.run_axis_to_completion("a")
+        # A is switchless -- homes instantly, no backoff attempted or needed.
         self.assertTrue(self.motion.axes["a"].is_homed())
         self.assertFalse(self.motion.axes["a"].has_fault())
 
-        self.assertTrue(self.motion.all_homed())
-
-    def test_all_homed_false_until_last_axis_retracts(self):
-        self.motion.home_all()
-
-        for axis_name in ("x", "y", "z"):
-            self.run_axis_to_completion(axis_name)
-            self.assertFalse(self.motion.all_homed())
-
-        # A reports is_homed() instantly, but all_homed() must not flip True
-        # off that raw per-axis flag alone (see MotionCoordinator.all_homed()).
-        self.run_axis_to_completion("a")
-        self.assertTrue(self.motion.axes["a"].is_homed())
         self.assertTrue(self.motion.all_homed())
 
 

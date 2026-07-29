@@ -233,6 +233,31 @@ Machine coordinate 0 on X/Y/Z is wherever the negative limit switch is, and
 the machine always requires a fresh `home_all()` every process start -- see
 section 9 and `docs/potential_issues.md`.
 
+### X, Y, and Z home concurrently, then each backs off independently
+
+`MotionCoordinator.home_all()` issues `command.home(joint)` for every axis
+at once -- X, Y, Z, and A all start homing in the same heartbeat, not one
+at a time. This is safe precisely because `HOME_IGNORE_LIMITS` is evaluated
+per joint inside LinuxCNC's own compiled homing state machine: one joint's
+switch tripping (and LinuxCNC clearing/re-arming whatever internal state
+that involves) has no effect on any other joint's own independent homing
+sequence. There is no shared reactive mechanism here to race against (that
+was specifically the software-homing/`override_limits()` design removed
+above), so nothing requires serializing the joints against each other.
+
+Once a given joint reports `status.joint[n]['homed']` (position 0, right
+at the negative switch), `LinuxCNCAxialInterface.poll_homing()`
+immediately commands that same joint to back off to its own configured
+`retracted_distance` (a plain MDI move, not a re-seek) before considering
+that joint's homing complete -- see
+`JointConfiguration.retracted_distance`'s docstring. This backoff is
+entirely per-joint and asynchronous: a joint that finishes homing (and
+backing off) sooner does not wait for any other joint. The same backoff
+also happens at the end of every later retract-to-zero
+(`LinuxCNCAxialInterface.start_retract_to_zero()`/
+`poll_retract_to_zero()`), since that re-runs the same native homing
+sequence.
+
 `dual_limit_switches` (section 5) doesn't change homing behavior at all --
 native homing never remeasures travel regardless of it (see
 `generate_ini()`); it only controls whether `generate_hal(simulate=True)`
@@ -301,11 +326,11 @@ motor, set these:
 | `is_angular` | `true` for A only. |
 | `has_limit_switches` | `false` for A only -- see section 6. |
 | `dual_limit_switches` | `true` if this joint has a switch at *both* ends of travel and homing should measure the real distance between them; `false` (this project's actual X/Y/Z, despite `true` being the class default) if it only has the one negative/zero-end switch, in which case `positive_limit_input` must be `null` and the configured `extended_distance` is trusted as-is rather than measured. Only meaningful when `has_limit_switches` is `true` -- see section 7. |
-| `retract_to` | The absolute position (native units, same zero as `retracted_distance`/`extended_distance`) this joint moves to on retract instead of re-seeking the negative limit switch -- `1.5` for Y (see section 7's "Retract-to-zero"). `null` (default) for every other joint. Must fall within `[-retracted_distance, extended_distance]` when both are configured. |
+| `retract_to` | The absolute position (native units, same zero as `retracted_distance`/`extended_distance`) this joint moves to on retract instead of re-seeking the negative limit switch -- `1.5` for Y (see section 7's "Retract-to-zero"). `null` (default) for every other joint. Must fall within `[retracted_distance, extended_distance]` when both are configured. |
 | `inverted` | `true` if the joint moves the wrong physical direction. Flips the motor's direction in software; the normal fix for a reversed motor/lead, cheaper than re-wiring. |
 | `invert_negative_limit` / `invert_positive_limit` | `true` if that limit switch reads backwards from the normally-closed wiring in section 5. |
 | `home_sequence` | See section 7. Leave at `-1` to home this joint on its own in "Home All"; LinuxCNC then defaults it to the joint number. |
-| `retracted_distance` | Positive distance from zero to this joint's retracted (negative-direction) soft limit, in inches (or degrees for A). For X/Y/Z: 0 -- the negative limit switch itself is both zero and the retracted end, so there's normally nothing beyond it. For A: `null` (section 6) -- A has no physical limit and no reference switch, so instead of carrying an arbitrary large sentinel value, this end's soft limit is genuinely disabled (a logged warning at load time says so). Becomes `-retracted_distance` in the generated INI's `MIN_LIMIT` when set; omitted (LinuxCNC then applies its own `-1e99` default) when `null`. |
+| `retracted_distance` | Positive position this joint backs off to immediately after LinuxCNC's native homing finds its negative limit switch (which always sits at 0), in inches (or degrees for A) -- its standoff/parked position, and this end's soft-limit floor (`0.25` for X/Y/Z: enough clearance that normal operation never re-triggers the switch). For A: `null` (section 6) -- A has no physical limit, no reference switch, and so nothing to back off from either; instead of carrying an arbitrary large sentinel value, this end's soft limit is genuinely disabled (a logged warning at load time says so). Becomes the generated INI's `MIN_LIMIT` directly when set; omitted (LinuxCNC then applies its own `-1e99` default) when `null`. Must be less than `extended_distance` when both are set. |
 | `extended_distance` | Positive distance from zero to this joint's extended (positive-direction) soft limit, in inches (or degrees for A). For X/Y/Z: the one-directional distance from the negative limit switch. For A: `null`, same reasoning as `retracted_distance` above. Becomes the generated INI's `MAX_LIMIT` directly when set; omitted (LinuxCNC default `1e99`) when `null`. Setting either to `null` on any joint disables that end's software safety check the same way -- for X/Y/Z it also disables `lcaf.toolpathing.toolpath_slicer`'s matching travel-limit check, so only do this with a real physical limit switch or mechanical stop backing that end up. |
 | `step_length_ns`, `step_space_ns`, `direction_setup_ns`, `direction_hold_ns` | Stepper driver signal timing in nanoseconds. Defaults are usually fine; check your driver's datasheet if steps are missed or the motor is silent. |
 
@@ -338,18 +363,20 @@ correctly regardless of the inch-native machine config above. You never
 need to convert a toolpath file to inches.
 
 **Every axis is zero-based, matching where it physically starts, with range
-`[-retracted_distance, extended_distance]`:**
+`[retracted_distance, extended_distance]`:**
 
-- **X/Y/Z**: `retracted_distance` is 0, so the range is effectively `[0,
-  extended_distance]`. 0 is wherever LinuxCNC's own native homing lands
-  (section 7). The toolpath planner's own X=0 is the clamp,
-  the same physical point (see [toolpath_slicer.md](toolpath_slicer.md)),
-  so a normal toolpath needs no manual coordinate-shifting to fit this
-  range.
-- **A**: `retracted_distance` and `extended_distance` are configured equal,
-  so the range is symmetric: `[-extended_distance, extended_distance]`. 0
-  is wherever it was sitting at power-on (section 6); it is free to move
-  either direction from there.
+- **X/Y/Z**: 0 is wherever LinuxCNC's own native homing finds the negative
+  limit switch (section 7); the joint immediately backs off to
+  `retracted_distance` (`0.25`) after that, which is also this end's soft
+  limit floor -- so the practical range is `[0.25, extended_distance]`. The
+  toolpath planner's own X=0 is the clamp at the physical switch, not the
+  post-backoff resting point (see
+  [toolpath_slicer.md](toolpath_slicer.md)), so a normal toolpath needs no
+  manual coordinate-shifting to fit this range.
+- **A**: `retracted_distance` and `extended_distance` are both `null`
+  (section 6) -- genuinely unbounded, not a symmetric range. 0 is wherever
+  it was sitting at power-on; it is free to move either direction from
+  there with no software soft limit at all.
 
 ## 11. Setting everything up
 

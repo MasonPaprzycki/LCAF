@@ -305,13 +305,15 @@ class LinuxCNCAxialInterface:
         Advance homing by at most one step. Call every heartbeat while
         homing is in progress (Axis.poll() drives this) -- never blocks
         waiting on LinuxCNC status, unlike the old blocking home_axis() this
-        replaced. Returns True once homing has completed successfully
-        (axis_homed is now True); returns False if homing is still in
+        replaced. Returns True once homing (and, for a switched joint with a
+        configured retracted_distance, backing off its negative limit
+        switch -- see _start_backoff_from_switch()) has completed
+        successfully (axis_homed is now True); returns False if still in
         progress. Raises RuntimeError on a reported LinuxCNC joint fault, or
-        TimeoutError if the configured timeout elapses before
-        status.joint[n]['homed'] is observed -- Axis.poll() catches both and
-        moves the axis to AxisState.FAULT rather than letting them crash the
-        control process.
+        TimeoutError if the configured timeout elapses before the expected
+        condition is observed -- Axis.poll() catches both and moves the axis
+        to AxisState.FAULT rather than letting them crash the control
+        process.
         """
         if self._homing_phase is None:
             return self.axis_homed
@@ -326,24 +328,68 @@ class LinuxCNCAxialInterface:
                 f"Joint {self.joint.joint} ({self.joint.axis}) faulted while homing."
             )
 
-        if joint_status["homed"]:
-            # HOME_OFFSET is always 0.0 (see generate_ini()), so native
-            # position 0 is already where this project's own coordinate
-            # zero belongs -- no offset needed.
-            self.position_offset_to_native = 0.0
-            self._set_homed_limits()
-            self.axis_homed = True
-            self._homing_phase = None
-            return True
+        if self._homing_phase == "native_wait":
+            if joint_status["homed"]:
+                # HOME_OFFSET is always 0.0 (see generate_ini()), so native
+                # position 0 is already where this project's own coordinate
+                # zero belongs -- no offset needed.
+                self.position_offset_to_native = 0.0
+                self._set_homed_limits()
 
-        if time.monotonic() - self._homing_start_time > self._homing_timeout:
-            self._homing_phase = None
-            raise TimeoutError(
-                f"Timed out waiting for joint {self.joint.joint} "
-                f"({self.joint.axis}) to report native-homed."
-            )
+                if self._start_backoff_from_switch():
+                    self._homing_phase = "native_backoff"
+                    self._homing_start_time = time.monotonic()
+                    return False
+
+                self.axis_homed = True
+                self._homing_phase = None
+                return True
+
+            if time.monotonic() - self._homing_start_time > self._homing_timeout:
+                self._homing_phase = None
+                raise TimeoutError(
+                    f"Timed out waiting for joint {self.joint.joint} "
+                    f"({self.joint.axis}) to report native-homed."
+                )
+
+            return False
+
+        if self._homing_phase == "native_backoff":
+            if self.is_axis_in_position():
+                self.axis_homed = True
+                self._homing_phase = None
+                return True
+
+            if time.monotonic() - self._homing_start_time > self._homing_timeout:
+                self._homing_phase = None
+                raise TimeoutError(
+                    f"Timed out waiting for joint {self.joint.joint} ({self.joint.axis}) "
+                    "to back off its negative limit switch."
+                )
+
+            return False
 
         return False
+
+    def _start_backoff_from_switch(self) -> bool:
+        """
+        Command the move off the negative limit switch (position 0, just
+        established by native homing) to this joint's configured
+        retracted_distance -- its standoff/parked position, so normal
+        operation never sits on or re-triggers the switch (see
+        JointConfiguration.retracted_distance). Returns False (no move
+        issued) if retracted_distance isn't configured or is 0 -- there is
+        nothing to back off to. Shared by poll_homing() and
+        poll_retract_to_zero(), since both re-establish 0 at the negative
+        switch and then need this same backoff.
+        """
+        if self.joint.retracted_distance is None or self.joint.retracted_distance <= 0:
+            return False
+
+        target_machine_units = self.to_machine_units(self.joint.retracted_distance)
+        feed_per_minute = self.to_machine_units(self.joint.max_velocity) * 60
+        self.move(target_machine_units, feed=feed_per_minute)
+        return True
 
     def is_homing_in_progress(self) -> bool:
         return self._homing_phase is not None
@@ -479,6 +525,12 @@ class LinuxCNCAxialInterface:
                 # HOME_OFFSET is always 0.0 (see generate_ini()), so native
                 # position 0 is already this project's own coordinate zero.
                 self.position_offset_to_native = 0.0
+
+                if self._start_backoff_from_switch():
+                    self._retract_phase = "native_backoff"
+                    self._retract_start_time = time.monotonic()
+                    return False
+
                 self._retract_phase = None
                 return True
 
@@ -487,6 +539,29 @@ class LinuxCNCAxialInterface:
                 raise TimeoutError(
                     f"Timed out waiting for joint {self.joint.joint} ({self.joint.axis}) "
                     "to re-home during retract-to-zero."
+                )
+
+            return False
+
+        if self._retract_phase == "native_backoff":
+            joint_status = self.status.joint[self.joint.joint]
+
+            if joint_status["fault"]:
+                self._retract_phase = None
+                raise RuntimeError(
+                    f"Joint {self.joint.joint} ({self.joint.axis}) faulted while backing off "
+                    "its negative limit switch during retract-to-zero."
+                )
+
+            if self.is_axis_in_position():
+                self._retract_phase = None
+                return True
+
+            if time.monotonic() - self._retract_start_time > self._homing_timeout:
+                self._retract_phase = None
+                raise TimeoutError(
+                    f"Timed out waiting for joint {self.joint.joint} ({self.joint.axis}) "
+                    "to back off its negative limit switch during retract-to-zero."
                 )
 
             return False

@@ -74,11 +74,11 @@ here on its own.
   that `VERIFY_*_RETRACTED` waits for `Axis.is_retracted()` before
   advancing, that the full Z->Y->X sequence reaches `ROTATE_A`, and that a
   joint which never completed initial homing surfaces as a motion fault
-  instead of silently moving. `SequentialHomingTests` covers `home_all()`:
-  axes home and immediately retract one at a time in joint order (not all
-  homed first, then all retracted), the switchless A joint skips retract
-  entirely, and `all_homed()` only reports True once every axis has both
-  homed and retracted -- not just off each axis's own raw homed flag.
+  instead of silently moving. `ConcurrentHomingTests` covers `home_all()`:
+  every axis's own `command.home()` is issued in the same heartbeat (not
+  one at a time), each axis homes and backs off to its own
+  `retracted_distance` fully independently of the others, and
+  `all_homed()` only reports True once every axis has finished.
 
 - **`conftest.py`** -- installs the fake `linuxcnc`/`hal` modules (below)
   into `sys.modules` before any test module is collected, so

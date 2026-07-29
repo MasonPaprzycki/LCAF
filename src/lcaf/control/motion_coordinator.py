@@ -102,14 +102,6 @@ class MotionCoordinator:
 
         self.fault_message = ""
 
-        # Sequential homing state -- see home_all()/_advance_sequential_homing().
-        # _homing_order is empty and _homing_phase is None both before the
-        # first home_all() call and after the whole sequence (every axis
-        # homed AND retracted, one at a time) has completed.
-        self._homing_order: list[str] = []
-        self._homing_position = 0
-        self._homing_phase: str | None = None
-
         # See _write_homed_properties()/_warn_if_not_homed() below: a
         # diagnostic record of the last successful homing, plus a startup
         # warning that this process instance has not homed yet. This file
@@ -205,8 +197,6 @@ class MotionCoordinator:
                 )
 
                 raise
-
-        self._advance_sequential_homing()
 
         if not self._homed_properties_written and self.homing_complete():
             self._write_homed_properties()
@@ -381,112 +371,51 @@ class MotionCoordinator:
 
     def home_all(self):
         """
-        Home all machine axes sequentially -- one axis at a time, each
-        immediately retracted to its retracted position as soon as it finds
-        its home switch, before the next axis begins seeking its own switch.
-        See _advance_sequential_homing(), which drives this every poll().
+        Home all machine axes at once -- LinuxCNC's own native homing
+        sequence for each joint is entirely independent and safe to run
+        concurrently (HOME_IGNORE_LIMITS is evaluated per joint inside
+        LinuxCNC's own compiled homing state machine, not a shared
+        machine-wide reactive mechanism -- see JointConfiguration/
+        MachineConfiguration's homing note), so there is no ordering or
+        shared resource to serialize against here.
 
-        This project always homes via LinuxCNC's own native homing sequence
-        (see JointConfiguration/MachineConfiguration's homing note) --
-        HOME_IGNORE_LIMITS makes each joint's own home-seek safe on its own,
-        regardless of how many other joints are homing at the same time, so
-        this one-at-a-time ordering isn't about avoiding a race. It exists
-        because retracting each axis immediately after it homes -- rather
-        than waiting for every axis to finish homing first -- is this
-        project's own requirement (see _advance_sequential_homing()).
+        Each axis backs off to its own configured retracted_distance
+        immediately once its own homing completes -- entirely inside
+        LinuxCNCAxialInterface.poll_homing() (see
+        JointConfiguration.retracted_distance), transparently to this
+        class: Axis.is_homed() (and therefore all_homed() below) only
+        becomes true once that backoff has finished too, independently per
+        axis, with no cross-axis sequencing needed.
         """
 
-        try:
-            self._homing_order = sorted(self.axes, key=lambda name: self.axes[name].joint)
-            self._homing_position = 0
-            self._homing_phase = "homing"
+        self.logger.info("HOMING START: all axes")
 
-            self.logger.info("HOMING START: all axes (sequential)")
+        for name, motor in self.axes.items():
+            try:
+                self.logger.info(f"HOMING COMMAND: axis={name}")
+                motor.home()
 
-            first_axis = self._homing_order[0]
-            self.logger.info(f"HOMING COMMAND: axis={first_axis}")
-            self.axes[first_axis].home()
+            except Exception as e:
+                self.logger.exception(f"HOMING FAILED: axis={name}, error={e}")
+                raise
 
-        except Exception as e:
-            self.logger.exception(f"HOMING FAILED: error={e}")
-            raise
-
-    def _advance_sequential_homing(self):
-        """
-        Called every poll() heartbeat while a home_all() sequence is in
-        progress. Moves the current axis from "homing" to "retracting" once
-        it finds its switch, then advances to the next axis's "homing" phase
-        once that retract completes -- see home_all()'s docstring for why
-        this must stay strictly one axis at a time. No-op once the sequence
-        has completed (or before one has ever been started).
-        """
-        if self._homing_phase is None:
-            return
-
-        current_name = self._homing_order[self._homing_position]
-        current_axis = self.axes[current_name]
-
-        if current_axis.has_fault():
-            return  # ForgeBrain/first_faulted_axis() handles reporting this.
-
-        if self._homing_phase == "homing":
-            if not current_axis.is_homed():
-                return
-
-            # A switchless joint (has_limit_switches=False, e.g. this
-            # project's A) has no switch to re-seek -- start_retract_to_zero()
-            # itself refuses that joint outright (RuntimeError -- see its
-            # docstring), and there is nothing meaningful to retract to
-            # anyway, since its "home" is just wherever it sat at boot. Skip
-            # straight to the next axis instead of retracting.
-            if not current_axis.axial_interface.joint.has_limit_switches:
-                self.logger.info(
-                    f"HOMING COMPLETE (no retract -- switchless joint): axis={current_name}"
-                )
-                self._advance_to_next_axis()
-                return
-
-            self.logger.info(f"HOMING COMPLETE, RETRACTING: axis={current_name}")
-            current_axis.retract_to_zero()
-            self._homing_phase = "retracting"
-            return
-
-        if self._homing_phase == "retracting" and current_axis.is_retracted():
-            self._advance_to_next_axis()
-
-    def _advance_to_next_axis(self):
-        """
-        Move from the current axis to the next one in _homing_order, or
-        finish the sequence if this was the last one -- shared by both the
-        normal retract-complete path and the switchless-joint skip in
-        _advance_sequential_homing().
-        """
-        self._homing_position += 1
-
-        if self._homing_position >= len(self._homing_order):
-            self.logger.info("HOMING COMPLETE: all axes homed and retracted")
-            self._homing_phase = None
-            return
-
-        next_name = self._homing_order[self._homing_position]
-        self.logger.info(f"HOMING COMMAND: axis={next_name}")
-        self.axes[next_name].home()
-        self._homing_phase = "homing"
+        self.logger.info("HOMING COMMANDS ISSUED: all axes")
 
     def all_homed(self):
-        """
-        True once home_all()'s full sequence has completed -- every axis
-        homed AND retracted, one at a time, in order. Deliberately not
-        "every axis's own is_homed() is currently true": the last axis in
-        the sequence reports is_homed() True as soon as its own homing seek
-        finishes, before its own retract has even started -- see
-        home_all()/_advance_sequential_homing().
-        """
-        return bool(self._homing_order) and self._homing_phase is None
+        return all(
+            motor.is_homed()
+            for motor in self.axes.values()
+        )
 
     def homing_complete(self):
-        """Alias for all_homed() -- see its docstring."""
-        return self.all_homed()
+        """
+        Check if all axes have completed homing.
+        """
+        for name, axis in self.axes.items():
+            if not axis.is_homed():
+                return False
+
+        return True
 
     def start(self, operation: ToolpathOperation):
 

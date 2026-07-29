@@ -25,6 +25,28 @@ def make_switched_joint(joint: int = 0, axis: str = "X") -> JointConfiguration:
     )
 
 
+def make_switched_joint_with_backoff(joint: int = 0, axis: str = "X") -> JointConfiguration:
+    """Same as make_switched_joint(), but with a nonzero retracted_distance
+    (matching real axis.json's X/Y/Z, all 0.25) so tests can exercise
+    _start_backoff_from_switch() -- make_switched_joint()'s retracted_distance=0.0
+    never triggers a backoff move at all."""
+    return JointConfiguration(
+        joint=joint,
+        axis=axis,
+        motor_steps_per_revolution=200,
+        microsteps=16,
+        travel_per_motor_rev=0.2,
+        max_velocity=1.0,
+        max_acceleration=5.0,
+        mesa_stepgen=f"hm2_7i76e.0.stepgen.0{joint}",
+        negative_limit_input=f"hm2_7i76e.0.7i76.0.0.input-{2 * joint:02d}",
+        positive_limit_input=f"hm2_7i76e.0.7i76.0.0.input-{2 * joint + 1:02d}",
+        has_limit_switches=True,
+        retracted_distance=0.25,
+        extended_distance=10.0,
+    )
+
+
 def make_single_switch_joint(joint: int = 0, axis: str = "X") -> JointConfiguration:
     return JointConfiguration(
         joint=joint,
@@ -50,8 +72,8 @@ def make_switchless_joint(joint: int = 3, axis: str = "A") -> JointConfiguration
         travel_per_motor_rev=360.0, max_velocity=45.0, max_acceleration=50.0,
         mesa_stepgen=f"hm2_7i76e.0.stepgen.0{joint}", is_angular=True,
         has_limit_switches=False, negative_limit_input=None,
-        positive_limit_input=None, retracted_distance=100000.0,
-        extended_distance=100000.0,
+        positive_limit_input=None, retracted_distance=None,
+        extended_distance=None,
     )
 
 
@@ -144,7 +166,7 @@ class NativeHomingTests(unittest.TestCase):
         self.stat.joint[self.joint.joint]["homed"] = True
         self.axial.poll_homing()
 
-        self.assertEqual(self.axial.min_limit["native"], -self.joint.retracted_distance)
+        self.assertEqual(self.axial.min_limit["native"], self.joint.retracted_distance)
         self.assertEqual(self.axial.max_limit["native"], self.joint.extended_distance)
 
     def test_fault_while_homing_raises(self):
@@ -173,6 +195,106 @@ class NativeHomingTests(unittest.TestCase):
         # A hard-limit trip is a distinct signal from the amp/following-error
         # fault flag -- is_faulted() must not be affected by it.
         self.assertFalse(self.axial.is_faulted())
+
+
+class BackoffAfterHomingTests(unittest.TestCase):
+    """
+    Once native homing reports a switched joint homed (position 0, right at
+    its negative limit switch), it must immediately back off to
+    retracted_distance -- its standoff/parked position and this end's soft
+    limit floor (see JointConfiguration.retracted_distance) -- before
+    poll_homing() reports the joint fully homed. The same backoff must
+    happen at the end of every later retract-to-zero.
+    """
+
+    def setUp(self):
+        self.fake_linuxcnc = sys.modules["linuxcnc"]
+        self.fake_hal = sys.modules["hal"]
+        self.fake_hal.pins.clear()
+
+        self.joint = make_switched_joint_with_backoff()
+        self.machine = LinuxCNCMachineInterface()
+        self.command = self.fake_linuxcnc._last_command
+        self.stat = self.fake_linuxcnc._last_stat
+        self.axial = LinuxCNCAxialInterface(self.joint, self.machine)
+
+    def test_homing_backs_off_to_retracted_distance_before_completing(self):
+        self.axial.start_homing(timeout=5.0)
+        self.stat.joint[self.joint.joint]["homed"] = True
+        self.stat.joint[self.joint.joint]["inpos"] = False
+
+        # Homed at the switch, but not yet done -- the backoff move must be
+        # commanded and awaited before axis_homed becomes True.
+        self.assertFalse(self.axial.poll_homing())
+        self.assertEqual(self.axial._homing_phase, "native_backoff")
+        self.assertFalse(self.axial.has_axis_been_homed())
+
+        mdi_calls = [c for c in self.command.calls if c[0] == "mdi"]
+        self.assertEqual(len(mdi_calls), 1)
+        # retracted_distance=0.25 in -> 6.35 mm (to_machine_units).
+        self.assertIn("X6.3500", mdi_calls[0][1])
+
+        self.stat.joint[self.joint.joint]["inpos"] = True
+        self.assertTrue(self.axial.poll_homing())
+        self.assertTrue(self.axial.has_axis_been_homed())
+        self.assertIsNone(self.axial._homing_phase)
+
+    def test_zero_retracted_distance_skips_backoff_entirely(self):
+        zero_backoff_joint = make_switched_joint()  # retracted_distance=0.0
+        axial = LinuxCNCAxialInterface(zero_backoff_joint, self.machine)
+
+        axial.start_homing(timeout=5.0)
+        self.stat.joint[zero_backoff_joint.joint]["homed"] = True
+
+        self.assertTrue(axial.poll_homing())
+        self.assertTrue(axial.has_axis_been_homed())
+
+        call_names = [c[0] for c in self.command.calls]
+        self.assertNotIn("mdi", call_names)
+
+    def test_backoff_fault_raises(self):
+        self.axial.start_homing(timeout=5.0)
+        self.stat.joint[self.joint.joint]["homed"] = True
+        self.axial.poll_homing()
+        self.assertEqual(self.axial._homing_phase, "native_backoff")
+
+        self.stat.joint[self.joint.joint]["fault"] = True
+        with self.assertRaises(RuntimeError):
+            self.axial.poll_homing()
+
+    def test_backoff_timeout_raises(self):
+        import time as time_module
+
+        self.axial.start_homing(timeout=0.0)
+        self.stat.joint[self.joint.joint]["homed"] = True
+        self.stat.joint[self.joint.joint]["inpos"] = False
+        self.axial.poll_homing()
+        self.assertEqual(self.axial._homing_phase, "native_backoff")
+
+        self.axial._homing_start_time = time_module.monotonic() - 1.0
+        with self.assertRaises(TimeoutError):
+            self.axial.poll_homing()
+
+    def test_retract_to_zero_also_backs_off_after_rehoming(self):
+        self.axial.start_homing(timeout=5.0)
+        self.stat.joint[self.joint.joint]["homed"] = True
+        self.axial.poll_homing()
+        self.stat.joint[self.joint.joint]["inpos"] = True
+        self.axial.poll_homing()
+        self.assertTrue(self.axial.has_axis_been_homed())
+
+        self.stat.joint[self.joint.joint]["homed"] = False
+        self.stat.joint[self.joint.joint]["inpos"] = False
+        self.axial.start_retract_to_zero(speed=1.0, timeout=5.0)
+        self.assertEqual(self.axial._retract_phase, "native_wait")
+
+        self.stat.joint[self.joint.joint]["homed"] = True
+        self.assertFalse(self.axial.poll_retract_to_zero())
+        self.assertEqual(self.axial._retract_phase, "native_backoff")
+
+        self.stat.joint[self.joint.joint]["inpos"] = True
+        self.assertTrue(self.axial.poll_retract_to_zero())
+        self.assertIsNone(self.axial._retract_phase)
 
 
 class SingleLimitSwitchHomingTests(unittest.TestCase):

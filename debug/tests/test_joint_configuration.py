@@ -64,8 +64,8 @@ class LimitSwitchPinValidationTests(unittest.TestCase):
             has_limit_switches=False,
             negative_limit_input=None,
             positive_limit_input=None,
-            retracted_distance=100000.0,
-            extended_distance=100000.0,
+            retracted_distance=None,
+            extended_distance=None,
         )
         self.assertIsNone(joint.negative_limit_input)
         self.assertIsNone(joint.positive_limit_input)
@@ -224,7 +224,7 @@ class RetractToValidationTests(unittest.TestCase):
     configs/axis.json) is the absolute position a joint moves to on
     retract instead of re-seeking its negative limit switch -- see
     LinuxCNCAxialInterface.start_retract_to_zero(). When both travel
-    limits are known it must fall within [-retracted_distance,
+    limits are known it must fall within [retracted_distance,
     extended_distance], the same soft-limited range every other command is
     held to.
     """
