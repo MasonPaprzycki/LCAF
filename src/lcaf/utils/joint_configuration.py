@@ -125,8 +125,7 @@ class JointConfiguration:
     negative_limit_input: str | None = None
     """Physical Mesa field-input pin wired to the negative (zero-end) limit
     switch, e.g. hm2_7i76e.0.7i76.0.0.input-00. None if has_limit_switches
-    is False. When MachineConfiguration.use_linuxcnc_native_processes is
-    True, this same signal also doubles as LinuxCNC's native home switch
+    is False. This same signal also doubles as LinuxCNC's native home switch
     (joint.N.home-sw-in) -- see generate_hal()."""
 
     positive_limit_input: str | None = None
@@ -151,30 +150,22 @@ class JointConfiguration:
     dual_limit_switches: bool = True
     """
     Only meaningful when has_limit_switches is True (ignored for a
-    switchless joint like A). Selects which of two software-homing
-    strategies a switched joint uses -- see
-    LinuxCNCAxialInterface._start_software_homing/poll_homing.
+    switchless joint like A). Whether this joint has a real positive
+    (max-travel-end) limit switch wired in addition to its negative one.
 
-    True (default -- this project's original X/Y/Z wiring, a switch at
-    each end of travel per docs/hardware_setup.md section 5): homing seeks
-    the negative limit switch to establish zero, then also seeks the
-    positive limit switch and *measures* the actual travel between them,
-    overriding the configured extended_distance with that live measurement.
-    Requires positive_limit_input to be set.
+    True (this project's original X/Y/Z wiring, a switch at each end of
+    travel per docs/hardware_setup.md section 5): requires
+    positive_limit_input to be set. False: this joint has only a negative
+    (zero-end) limit switch wired -- positive_limit_input must be None.
 
-    False: this joint has only a negative (zero-end) limit switch wired --
-    positive_limit_input must be None. Homing seeks the negative switch to
-    establish zero exactly as above, but then stops there and trusts the
-    configured extended_distance as a static software limit instead of
-    measuring it (there is no second switch to seek). Useful when a joint's
-    far end of travel is bounded by a known mechanical stop (leadscrew end,
-    frame limit) that isn't worth wiring a second switch to.
-
-    Native homing (MachineConfiguration.use_linuxcnc_native_processes=True)
-    behaves the same regardless of this flag: LinuxCNC's own native homing
-    sequence never remeasures travel either way (MAX_LIMIT is always the
-    static configured value in the generated INI -- see generate_ini()), so
-    this only changes behavior under this project's own software homing.
+    LinuxCNC's own native homing (the only homing this project uses --
+    see this module's homing note) never seeks a positive switch or
+    remeasures travel regardless of this flag; MAX_LIMIT is always the
+    static configured extended_distance (see generate_ini()). This flag's
+    remaining effects are validating that positive_limit_input is set/unset
+    consistently with it (__post_init__) and, for a joint with
+    has_limit_switches=True, whether generate_hal(simulate=True) builds one
+    or two fake limit switches.
     """
 
     retract_to: float | None = None
@@ -222,13 +213,11 @@ class JointConfiguration:
     Fully supported in HAL (see generate_hal()).
     """
 
-    # Native-homing sequencing. Only meaningful when
-    # MachineConfiguration.use_linuxcnc_native_processes is True, in which
-    # case generate_ini() uses this joint's own number (0-3) as its
-    # HOME_SEQUENCE when this is left at -1, so "Home All" homes joints one
-    # at a time in joint-number order. Set explicitly only to home two
-    # joints simultaneously (matching LinuxCNC's HOME_SEQUENCE semantics).
-    # Inert when use_linuxcnc_native_processes is False.
+    # Native-homing sequencing. generate_ini() uses this joint's own number
+    # (0-3) as its HOME_SEQUENCE when this is left at -1, so "Home All"
+    # homes joints one at a time in joint-number order. Set explicitly only
+    # to home two joints simultaneously (matching LinuxCNC's HOME_SEQUENCE
+    # semantics).
     home_sequence: int = -1
 
     # Software travel limits. When set, both are always-positive distances,
@@ -243,13 +232,12 @@ class JointConfiguration:
     # case generate_ini() omits that entry rather than inventing a
     # placeholder, matching LinuxCNC's own "no limit" semantics.
     #   - A switched linear joint (X/Y/Z): retracted_distance is normally 0
-    #     -- 0 is wherever homing finds the negative limit switch (measured
-    #     in software mode, or wherever LinuxCNC's own native homing lands
-    #     in native mode -- see LinuxCNCAxialInterface.start_homing/
-    #     poll_homing), and that switch is the physical retracted end of
-    #     travel too. extended_distance is the static envelope LinuxCNC's
-    #     INI soft limits use (or, for a dual_limit_switches joint, gets
-    #     overridden by the live measurement to the positive switch).
+    #     -- 0 is wherever LinuxCNC's own native homing lands (see
+    #     LinuxCNCAxialInterface.start_homing/poll_homing), and that switch
+    #     is the physical retracted end of travel too. extended_distance is
+    #     the static envelope LinuxCNC's INI soft limits use -- native
+    #     homing never remeasures it, regardless of dual_limit_switches (see
+    #     that field's docstring).
     #   - The switchless angular joint (A): 0 is simply wherever it was
     #     sitting when it powered on (there is no reference switch to
     #     seek), and since this project has no cable-wrap constraint on A,
@@ -449,6 +437,27 @@ class MachineConfiguration:
     default_angular_* pair for each), so field names carry their unit
     suffix directly: "_in_s" (inches/second), "_in_s2" (inches/second^2),
     "_deg_s", "_deg_s2", "_ns" (nanoseconds).
+
+    Homing: this project always uses LinuxCNC's own native homing sequence
+    (LinuxCNCAxialInterface.start_homing()/poll_homing() call
+    command.home(joint) and wait for status.joint[n]['homed']) --
+    generate_hal() wires each switched joint's negative-limit input to its
+    HOME_SEARCH_VEL-driven joint.N.home-sw-in pin, and generate_ini() fills
+    in real HOME_SEARCH_VEL/HOME_LATCH_VEL/HOME_SEQUENCE/HOME_IGNORE_LIMITS
+    values. This project previously also supported driving homing itself in
+    Python (jogging each joint to its limit switches directly, with
+    command.override_limits() suppressing the resulting hard-limit fault) --
+    removed because LinuxCNC's own realtime motion loop re-checks each
+    joint's limit-switch HAL pin every servo cycle independently of any
+    Python process, and faults the whole machine (disabling every joint's
+    amp-enable-out, with no automatic recovery -- see
+    docs/potential_issues.md) the instant it sees a pin active without that
+    joint already in LinuxCNC's own override snapshot. A Python client
+    calling override_limits() reactively, once per its own control-loop
+    heartbeat, cannot reliably win that race -- LinuxCNC's own native homing
+    (HOME_IGNORE_LIMITS) avoids the race entirely by bypassing the
+    fault-check inside its own compiled homing state machine instead of
+    relying on this reactive, external mechanism.
     """
 
     machine_name: str
@@ -480,32 +489,6 @@ class MachineConfiguration:
     """
 
     watchdog_timeout_ns: int = 5_000_000
-
-    use_linuxcnc_native_processes: bool = False
-    """
-    Chooses which of two entirely different homing/motion-permission
-    strategies LinuxCNC runs under, machine-wide (this is not a per-joint
-    setting -- every joint homes the same way):
-
-    False (default): homing is done in Python by LinuxCNCAxialInterface --
-    jogging each switched joint to its limit switches directly, or zeroing
-    a switchless joint immediately (see JointConfiguration.has_limit_switches).
-    LinuxCNC's own [JOINT_n]HOME_SEQUENCE is left at -1 (native homing never
-    runs) and generate_ini() sets [TRAJ]NO_FORCE_HOMING = 1, because
-    LinuxCNC would otherwise never see status.homed become true for any
-    joint (that's tracked in this project's own Axis.is_homed() bookkeeping
-    instead) and would refuse every MDI move/program run.
-
-    True: LinuxCNC's own native homing sequence runs instead --
-    LinuxCNCAxialInterface.start_homing()/poll_homing() calls command.home(joint)
-    and waits (without blocking -- see poll_homing()) for status.joint[n]['homed'],
-    generate_hal() wires each switched
-    joint's negative-limit input to its HOME_SEARCH_VEL-driven
-    joint.N.home-sw-in pin too, and generate_ini() fills in real
-    HOME_SEARCH_VEL/HOME_LATCH_VEL/HOME_SEQUENCE values. Because LinuxCNC
-    genuinely knows every joint is homed, NO_FORCE_HOMING is left off (0)
-    -- there is no risk of LinuxCNC rejecting a subsequent MDI move or jog.
-    """
 
     linear_ferror_in: float = 1.0 / 25.4
     linear_min_ferror_in: float = 0.25 / 25.4
@@ -762,8 +745,7 @@ def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
 
                 neg_signal = f"{joint.axis.lower()}-neg-lim"
                 emit(f"net {neg_signal} {neg_comp}.out => {joint.negative_limit_hal_pin}")
-                if machine.use_linuxcnc_native_processes:
-                    emit(f"net {neg_signal} => {joint.joint_prefix}.home-sw-in")
+                emit(f"net {neg_signal} => {joint.joint_prefix}.home-sw-in")
                 if joint.dual_limit_switches:
                     emit(f"net {joint.axis.lower()}-pos-lim {pos_comp}.out => {joint.positive_limit_hal_pin}")
             else:
@@ -800,10 +782,10 @@ def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
                 neg_pin = _inverted_input_pin(neg_pin)
             neg_signal = f"{joint.axis.lower()}-neg-lim"
             emit(f"net {neg_signal} {neg_pin} => {joint.negative_limit_hal_pin}")
-            if machine.use_linuxcnc_native_processes:
-                # Same physical switch also serves as LinuxCNC's native home
-                # switch -- see MachineConfiguration.use_linuxcnc_native_processes.
-                emit(f"net {neg_signal} => {joint.joint_prefix}.home-sw-in")
+            # Same physical switch also serves as LinuxCNC's own native home
+            # switch -- this project only ever uses LinuxCNC's native homing
+            # (see MachineConfiguration's class docstring).
+            emit(f"net {neg_signal} => {joint.joint_prefix}.home-sw-in")
         elif not joint.has_limit_switches:
             emit(f"# Joint {joint.joint} ({joint.axis}) has no limit switches; homed by "
                  "zeroing at boot (has_limit_switches=False in axis.json).")
@@ -840,11 +822,9 @@ def _format_ini_value(value) -> str:
 # touching code.
 
 # Fraction of a joint's own max_velocity used as its native-homing search
-# and final latch speed when MachineConfiguration.use_linuxcnc_native_processes
-# is True. Not user-configurable: homing speed has always been a
-# conservative fixed fraction of normal running speed in this project (see
-# the previous fixed 0.03937 in/s software-homing default), not a tunable a
-# user is expected to reach for.
+# and final latch speed. Not user-configurable: homing speed has always been
+# a conservative fixed fraction of normal running speed in this project, not
+# a tunable a user is expected to reach for.
 _NATIVE_HOME_SEARCH_VEL_FRACTION = 0.1
 _NATIVE_HOME_LATCH_VEL_FRACTION = 0.02
 
@@ -919,14 +899,11 @@ def generate_ini(machine: MachineConfiguration) -> str:
         ("DEFAULT_ANGULAR_VELOCITY", _format_ini_value(machine.default_angular_velocity_deg_s)),
         ("MAX_ANGULAR_VELOCITY", _format_ini_value(machine.max_angular_velocity_deg_s)),
         ("POSITION_FILE", "position.txt"),
-        # False (use_linuxcnc_native_processes=False, the default): this
-        # project's own Python homing never makes LinuxCNC's own
-        # status.homed true, so without NO_FORCE_HOMING LinuxCNC would
-        # refuse every MDI move/program run forever. True: native homing
-        # runs for real, LinuxCNC genuinely knows every joint is homed, so
-        # this is left off -- see
-        # MachineConfiguration.use_linuxcnc_native_processes.
-        ("NO_FORCE_HOMING", "0" if machine.use_linuxcnc_native_processes else "1"),
+        # LinuxCNC's own native homing runs for real (see this module's
+        # homing note), so LinuxCNC genuinely knows every joint is homed --
+        # no risk of it rejecting a subsequent MDI move/jog, so this is left
+        # off (0).
+        ("NO_FORCE_HOMING", "0"),
     ])
 
     section("EMCIO", [
@@ -942,57 +919,32 @@ def generate_ini(machine: MachineConfiguration) -> str:
         ferror = machine.angular_ferror_deg if joint.is_angular else machine.linear_ferror_in
         min_ferror = machine.angular_min_ferror_deg if joint.is_angular else machine.linear_min_ferror_in
 
-        if machine.use_linuxcnc_native_processes:
-            if joint.has_limit_switches:
-                # Seek the negative limit switch (also wired as
-                # joint.N.home-sw-in, see generate_hal()), then back off and
-                # latch at a slower speed -- the standard two-phase LinuxCNC
-                # home sequence. HOME_IGNORE_LIMITS=YES because the search
-                # deliberately drives up to the same switch the negative
-                # soft/hard limit also watches. Native homing never seeks a
-                # positive switch or remeasures travel -- MAX_LIMIT below is
-                # always the static configured extended_distance regardless
-                # of joint.dual_limit_switches, so this branch is identical for
-                # a one- or two-limit-switch joint (dual_limit_switches only
-                # changes behavior under this project's own software
-                # homing -- see LinuxCNCAxialInterface).
-                home_search_vel = -abs(vel) * _NATIVE_HOME_SEARCH_VEL_FRACTION
-                home_latch_vel = abs(vel) * _NATIVE_HOME_LATCH_VEL_FRACTION
-            else:
-                # Switchless joint (A): HOME_SEARCH_VEL=0 tells LinuxCNC to
-                # treat wherever it currently is as home, with no seek move
-                # -- LinuxCNC's own native equivalent of this project's
-                # software zero-at-boot homing.
-                home_search_vel = 0.0
-                home_latch_vel = 0.0
-            # HOME_SEQUENCE < 0 in axis.json means "no explicit sequence
-            # requested" -- default to this joint's own number, so "Home
-            # All" homes joints one at a time in joint-number order.
-            home_sequence = joint.home_sequence if joint.home_sequence >= 0 else joint.joint
+        if joint.has_limit_switches:
+            # Seek the negative limit switch (also wired as
+            # joint.N.home-sw-in, see generate_hal()), then back off and
+            # latch at a slower speed -- the standard two-phase LinuxCNC
+            # home sequence. HOME_IGNORE_LIMITS=YES below because the search
+            # deliberately drives up to the same switch the negative
+            # soft/hard limit also watches. Never seeks a positive switch or
+            # remeasures travel -- MAX_LIMIT is always the static configured
+            # extended_distance regardless of joint.dual_limit_switches (see
+            # that field's docstring).
+            home_search_vel = -abs(vel) * _NATIVE_HOME_SEARCH_VEL_FRACTION
+            home_latch_vel = abs(vel) * _NATIVE_HOME_LATCH_VEL_FRACTION
         else:
+            # Switchless joint (A): HOME_SEARCH_VEL=0 tells LinuxCNC to
+            # treat wherever it currently is as home, with no seek move.
             home_search_vel = 0.0
             home_latch_vel = 0.0
-            # Must be non-negative. A *negative* HOME_SEQUENCE marks a joint
-            # as part of a "synchronized" homing group, and LinuxCNC's task
-            # controller then refuses joint-mode jogging on that joint until
-            # it reports homed -- regardless of NO_FORCE_HOMING (that only
-            # gates MDI/program-run, not jogging). This project's own
-            # software homing (_jog_toward_limit_switch) *is* a joint-mode
-            # jog, issued before LinuxCNC ever sees this joint as homed, so a
-            # negative value here would make LinuxCNC silently refuse every
-            # homing/retract jog this project issues. 0 for every joint is a
-            # neutral, unsynchronized, independent-homing value -- harmless
-            # since use_linuxcnc_native_processes=False also means LinuxCNC's
-            # own native homing sequence never actually runs (see above).
-            home_sequence = 0
+        # HOME_SEQUENCE < 0 in axis.json means "no explicit sequence
+        # requested" -- default to this joint's own number, so "Home All"
+        # homes joints one at a time in joint-number order.
+        home_sequence = joint.home_sequence if joint.home_sequence >= 0 else joint.joint
 
-        # Always YES, for every joint, in both homing modes. Native mode
-        # needs it so a switched joint's own home-seek can drive into its
-        # negative limit switch without LinuxCNC's homing state machine
-        # faulting on it. Under this project's own software homing, native
-        # homing never runs at all, so this setting has no effect there one
-        # way or the other -- it's set uniformly rather than conditionally
-        # so the INI doesn't imply a per-mode distinction that isn't real.
+        # A switched joint's own home-seek deliberately drives into the same
+        # switch its negative soft/hard limit also watches -- without this,
+        # LinuxCNC's homing state machine would fault on it instead of
+        # treating the trip as "found home".
         home_ignore_limits = "YES"
 
         # LinuxCNC's own documented behavior for an omitted MIN_LIMIT/

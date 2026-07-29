@@ -42,7 +42,7 @@ class HardLimitFaultDetectionTests(unittest.TestCase):
         self.fake_hal.pins.clear()
 
         self.joint = make_switched_joint()
-        self.machine = LinuxCNCMachineInterface(use_native_homing=False)
+        self.machine = LinuxCNCMachineInterface()
         self.stat = self.fake_linuxcnc._last_stat
         self.axis = Axis(self.joint, self.machine)
 
@@ -64,7 +64,7 @@ class HardLimitFaultDetectionTests(unittest.TestCase):
         self.assertEqual(self.axis.status.state, AxisState.HOMING)
 
         # The joint is expected to be sitting on (or driving into) its own
-        # switch during a deliberate software-homing seek.
+        # switch during a deliberate native-homing seek.
         self.stat.joint[self.joint.joint]["min_hard_limit"] = True
 
         self.axis.poll()
@@ -97,7 +97,7 @@ class RetractToZeroTests(unittest.TestCase):
         self.fake_hal.pins.clear()
 
         self.joint = make_switched_joint()
-        self.machine = LinuxCNCMachineInterface(use_native_homing=False)
+        self.machine = LinuxCNCMachineInterface()
         self.stat = self.fake_linuxcnc._last_stat
         self.axis = Axis(self.joint, self.machine)
 
@@ -110,20 +110,17 @@ class RetractToZeroTests(unittest.TestCase):
         # only requires axis_homed to be True beforehand.
         self.axis.axial_interface.axis_homed = True
 
-    def neg_pin(self) -> str:
-        return self.joint.negative_limit_hal_pin
-
     def test_retract_to_zero_completes_and_reports_retracted(self):
         self.axis.retract_to_zero()
         self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
         self.assertFalse(self.axis.is_retracted())
 
-        # First poll() issues start_retract_to_zero().
+        # First poll() issues start_retract_to_zero() (re-runs native home()).
         self.axis.poll()
         self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
         self.assertFalse(self.axis.is_retracted())
 
-        self.fake_hal.pins[self.neg_pin()] = True
+        self.stat.joint[self.joint.joint]["homed"] = True
         self.axis.poll()
 
         self.assertEqual(self.axis.status.state, AxisState.READY)
@@ -143,11 +140,11 @@ class RetractToZeroTests(unittest.TestCase):
     def test_is_retracted_resets_on_next_retract_call(self):
         self.axis.retract_to_zero()
         self.axis.poll()
-        self.fake_hal.pins[self.neg_pin()] = True
+        self.stat.joint[self.joint.joint]["homed"] = True
         self.axis.poll()
         self.assertTrue(self.axis.is_retracted())
 
-        self.fake_hal.pins.clear()
+        self.stat.joint[self.joint.joint]["homed"] = False
         self.axis.retract_to_zero()
 
         self.assertFalse(self.axis.is_retracted())

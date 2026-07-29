@@ -54,14 +54,18 @@ class Axis:
                 "(following error tripped -- see docs/potential_issues.md)."
             )
 
-        # HOMING and RETRACTING are excluded: software homing and
-        # retract-to-zero both deliberately drive this joint onto its own
-        # negative limit switch to find it (see
-        # LinuxCNCAxialInterface._jog_toward_limit_switch), so
-        # is_on_hard_limit() reading True during either phase is expected,
-        # not a fault. Anywhere else, LinuxCNC reporting this joint on a hard
-        # limit means every joint's enable output has just been disabled
-        # machine-wide (see docs/hardware_setup.md) -- a different condition
+        # HOMING and RETRACTING are excluded: LinuxCNC's own native homing
+        # and retract-to-zero both deliberately drive this joint onto its
+        # own negative limit switch to find it (see
+        # LinuxCNCAxialInterface.start_homing/start_retract_to_zero).
+        # HOME_IGNORE_LIMITS (generate_ini()) keeps LinuxCNC's homing state
+        # machine itself from faulting on that expected trip, but the raw
+        # status.joint[n]['min_hard_limit']/['max_hard_limit'] fields
+        # is_on_hard_limit() reads still reflect the physical pin regardless
+        # -- so is_on_hard_limit() reading True during either phase here is
+        # still expected, not a fault. Anywhere else, LinuxCNC reporting this
+        # joint on a hard limit means every joint's enable output has just
+        # been disabled machine-wide (see docs/hardware_setup.md) -- a different condition
         # from is_faulted() above (that only reflects following error, never
         # a hard-limit trip), so without this check it would go completely
         # unnoticed here.
@@ -94,7 +98,7 @@ class Axis:
                 return
 
             if not self.axial_interface.has_homing_ever_been_intialized():
-                self.axial_interface.start_homing(speed=self.axial_interface.joint.max_velocity)
+                self.axial_interface.start_homing()
                 return
 
             try:

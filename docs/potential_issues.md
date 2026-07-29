@@ -8,9 +8,9 @@
   open-loop steppers with no position feedback and a plain move could
   silently carry forward drift. The tradeoff: a switch that used to see one
   actuation per session (at `home_all()`) now sees one per operation, for
-  the life of the machine. This relies on `command.override_limits()`
-  succeeding on every one of those retracts, the same mechanism initial
-  homing already depends on (see `_jog_toward_limit_switch()`) -- nothing
+  the life of the machine. This relies on `HOME_IGNORE_LIMITS` (see
+  `docs/hardware_setup.md` section 7) succeeding on every one of those
+  retracts, the same mechanism initial homing already depends on -- nothing
   new there, just far more frequent. Worth watching during commissioning:
   switch mechanical life, and whether the extra seek time per operation is
   acceptable for cycle time on a real toolpath.
@@ -64,8 +64,8 @@
   `linuxcnc`/`hal` modules in `debug/tests/fake_linuxcnc.py`, installed by
   `debug/tests/conftest.py` -- the real modules only exist on the Raspberry
   Pi target) are the only test files -- see `debug/tests/README.md` for
-  what each one covers. That coverage is specifically the software homing /
-  `override_limits()` behavior, `dual_limit_switches` single-vs-dual-switch
+  what each one covers. That coverage is specifically the native homing /
+  `HOME_IGNORE_LIMITS` behavior, `dual_limit_switches` single-vs-dual-switch
   homing, retract-to-zero, and the `is_on_hard_limit()` fault detection
   described in `docs/hardware_setup.md` sections 5 and 7; most of
   `motion_coordinator.py` (everything past the retract states) and
@@ -73,7 +73,7 @@
   automated coverage. The fakes model LinuxCNC's Python API surface, not
   its actual servo-thread/hard-limit logic (`control.c`), and they never
   advance `joint_actual_position`/`inpos`/`velocity` on their own in
-  response to a jog/MDI move (tests that need a specific outcome set those
+  response to an MDI move (tests that need a specific outcome set those
   fields directly) -- so passing tests confirm this project's own call
   sequencing is correct, not that real LinuxCNC reacts the way the source
   reading behind that fix predicts -- that still needs confirming against

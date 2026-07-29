@@ -1011,11 +1011,10 @@ that imports `linuxcnc`/`hal`:
   MotionCoordinator publishes as `self.interface` for ForgeBrain to query.
 - **LinuxCNCAxialInterface**: one instance per joint, wrapping that same
   shared connection for its own joint number. Translates Axis requests into
-  per-joint LinuxCNC API calls -- MDI motion (`move`, `dwell`, `jog`),
-  homing (native LinuxCNC homing or this project's own software
-  limit-switch homing, per `machine.json`'s `use_linuxcnc_native_processes`),
-  and status/fault reads -- and exposes that joint's LinuxCNC status back to
-  Axis.
+  per-joint LinuxCNC API calls -- MDI motion (`move`, `dwell`), homing
+  (always LinuxCNC's own native homing sequence -- see
+  `docs/hardware_setup.md` section 7), and status/fault reads -- and
+  exposes that joint's LinuxCNC status back to Axis.
 
 Its sole responsibility is translating ForgeBrain/MotionCoordinator/Axis requests into LinuxCNC API calls and exposing LinuxCNC status back to the controller.
 

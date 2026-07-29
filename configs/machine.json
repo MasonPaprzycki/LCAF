@@ -21,8 +21,6 @@
 
     "watchdog_timeout_ns": 5000000,
 
-    "use_linuxcnc_native_processes": false,
-
     "linear_ferror_in": 0.03937008,
     "linear_min_ferror_in": 0.00984252,
     "angular_ferror_deg": 1.0,

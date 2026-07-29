@@ -85,9 +85,7 @@ class MotionCoordinator:
 
         self.machine_config = machine_config
 
-        self.interface = LinuxCNCMachineInterface(
-            use_native_homing=machine_config.use_linuxcnc_native_processes
-        )
+        self.interface = LinuxCNCMachineInterface()
 
         self.axes = {
             joint.axis.lower(): Axis(joint, self.interface)
@@ -148,15 +146,14 @@ class MotionCoordinator:
         """
         Persist a diagnostic record of the homing this process instance just
         completed: per-axis measured/configured travel limits and position
-        at completion, plus which homing strategy was used. Called once,
-        from poll(), the first time homing_complete() becomes true. This is
-        an audit/troubleshooting record only -- it is never read back to
-        skip homing on a later boot (see docs/potential_issues.md).
+        at completion. Called once, from poll(), the first time
+        homing_complete() becomes true. This is an audit/troubleshooting
+        record only -- it is never read back to skip homing on a later boot
+        (see docs/potential_issues.md).
         """
         properties = {
             "homed_at_unix": datetime.now(timezone.utc).timestamp(),
             "homed_at_iso": datetime.now(timezone.utc).isoformat(),
-            "use_linuxcnc_native_processes": self.interface.use_native_homing,
             "axes": {
                 name: {
                     "joint": axis.joint,
@@ -389,19 +386,14 @@ class MotionCoordinator:
         its home switch, before the next axis begins seeking its own switch.
         See _advance_sequential_homing(), which drives this every poll().
 
-        Homing every axis concurrently (the previous design) drove multiple
-        joints into their limit switches at the same time, but
-        command.override_limits() -- the mechanism
-        LinuxCNCAxialInterface._jog_toward_limit_switch() relies on to
-        suppress the hard-limit fault while deliberately homing into a
-        switch -- is a single machine-wide override, not one per joint. With
-        two joints jogging at once, the instant one settled back "in
-        position" after its own trip, the override cleared machine-wide; if
-        the other joint tripped its own switch in that same window, LinuxCNC
-        saw an un-overridden hard-limit trip and disabled every joint's
-        amp-enable-out, halting the whole machine's homing mid-sequence.
-        Only ever having one joint jogging at a time removes that race
-        entirely.
+        This project always homes via LinuxCNC's own native homing sequence
+        (see JointConfiguration/MachineConfiguration's homing note) --
+        HOME_IGNORE_LIMITS makes each joint's own home-seek safe on its own,
+        regardless of how many other joints are homing at the same time, so
+        this one-at-a-time ordering isn't about avoiding a race. It exists
+        because retracting each axis immediately after it homes -- rather
+        than waiting for every axis to finish homing first -- is this
+        project's own requirement (see _advance_sequential_homing()).
         """
 
         try:

@@ -128,12 +128,13 @@ both, but this project's own X/Y/Z are all wired **single-switch**: one
 negative (zero-end) limit switch each, with `positive_limit_input: null`
 and `dual_limit_switches: false` in `axis.json`. Homing seeks the one
 negative switch to establish zero, then stops there and trusts the
-configured `extended_distance` as a static limit rather than measuring it
-(there is no second switch to seek). If a joint ever does get a second,
-positive-end switch wired, set `dual_limit_switches: true` and
-`positive_limit_input` to that pin instead -- homing would then also seek
-it and *measure* the actual travel between the two switches, overriding
-`extended_distance` with that live measurement. See
+configured `extended_distance` as a static limit (LinuxCNC's own native
+homing -- the only homing this project uses -- never remeasures travel from
+a positive switch regardless of `dual_limit_switches`; see section 7). If a
+joint ever does get a second, positive-end switch wired, set
+`dual_limit_switches: true` and `positive_limit_input` to that pin instead
+so `generate_hal(simulate=True)` models it and the field/pin validation
+matches reality -- homing behavior itself doesn't change. See
 `JointConfiguration.dual_limit_switches` and section 7 below.
 
 ### What a tripped limit switch actually does
@@ -201,51 +202,42 @@ documented way of saying "no limit" (it substitutes `-1e99`/`1e99`), and
 reminder that this disables a safety check -- for A that's an accepted
 tradeoff, since it has no physical limit to check against anyway.
 
-## 7. Two homing strategies: `use_linuxcnc_native_processes`
+## 7. Homing: always LinuxCNC's own native homing sequence
 
-`configs/machine.json` has one machine-wide switch,
-`use_linuxcnc_native_processes`:
+This project always homes through LinuxCNC's own native homing sequence
+(`command.home(joint)`, then waiting for `status.joint[n]['homed']`) --
+`generate_hal()` wires each switched joint's negative-limit input to
+LinuxCNC's `home-sw-in` pin too, and `generate_ini()` fills in real
+`HOME_SEARCH_VEL`/`HOME_LATCH_VEL`/`HOME_SEQUENCE` values, including
+`HOME_IGNORE_LIMITS = YES` for every joint (so a switched joint's own
+home-seek can drive into the same switch its hard limit also watches
+without LinuxCNC's homing state machine faulting on it).
 
-- **`false` (default).** This project's own Python code homes each joint by
-  jogging it to its limit switches directly (or zeroing immediately for the
-  switchless A joint). LinuxCNC's own native homing sequence never runs.
-  Because LinuxCNC would otherwise never see any joint as "homed" and would
-  refuse every subsequent move, `generate_ini()` sets
-  `[TRAJ]NO_FORCE_HOMING = 1` automatically in this mode. The switch it
-  jogs into is also wired into LinuxCNC's own hard-limit fault pin (see
-  section 5), and LinuxCNC only exempts *its own* native homing state
-  machine from that fault -- a plain jog never qualifies. So before each
-  deliberate seek-jog, `LinuxCNCAxialInterface._jog_toward_limit_switch()`
-  calls `command.override_limits()` first (the same mechanism behind the
-  Axis GUI's "Override Limits" checkbox), and `poll_homing()` calls it
-  again on every heartbeat for as long as that seek is still in progress
-  (LinuxCNC clears an override once the joint next reports "in position,"
-  and there's no clean signal from here for exactly when a jog leaves that
-  state, so this re-arms it defensively rather than risk it lapsing right
-  before the switch trips); without it, the instant the switch trips,
-  LinuxCNC would disable the whole machine before this project's own
-  polling loop ever got a chance to react and stop the jog. See
-  `debug/tests/test_linuxcnc_interface.py` for this behavior under a stubbed
-  `linuxcnc`/`hal` (the real modules only exist on the Pi target -- section
-  12 below).
-- **`true`.** LinuxCNC's own native homing sequence runs instead
-  (`command.home(joint)`), using the same limit switches -- `generate_hal()`
-  wires each switched joint's negative-limit input to LinuxCNC's
-  `home-sw-in` pin too, and `generate_ini()` fills in real
-  `HOME_SEARCH_VEL`/`HOME_LATCH_VEL`/`HOME_SEQUENCE` values, including
-  `HOME_IGNORE_LIMITS = YES`. Nothing else in `axis.json` needs to change
-  to switch modes. This mode never needs `override_limits()` -- LinuxCNC's
-  own homing state machine is already exempt from the hard-limit fault
-  while it's running.
+This project previously also supported driving homing itself in Python
+(jogging each joint to its limit switches directly, with
+`command.override_limits()` suppressing the resulting hard-limit fault,
+toggled by a `use_linuxcnc_native_processes` machine.json switch) --
+removed, because it turned out to be fundamentally racy: LinuxCNC's own
+realtime motion loop re-checks each joint's hard-limit HAL pin every servo
+cycle (~1ms) completely independently of this Python process, and disables
+every joint's amp-enable-out machine-wide (with no automatic recovery --
+see `docs/potential_issues.md`) the instant it sees the pin active without
+that joint already in LinuxCNC's own override snapshot. A Python client
+calling `override_limits()` reactively, once per its own control-loop
+heartbeat (~20-50ms), cannot reliably win that race against LinuxCNC's own
+1ms realtime check. Native homing's `HOME_IGNORE_LIMITS` avoids the problem
+entirely, since it's a compiled state-machine-level bypass evaluated on the
+same cycle the trip is detected, not a reactive external mechanism.
 
-Either way, machine coordinate 0 on X/Y/Z is wherever the negative limit
-switch is, and the machine always requires a fresh `home_all()` every
-process start -- see section 9 and `docs/potential_issues.md`.
+Machine coordinate 0 on X/Y/Z is wherever the negative limit switch is, and
+the machine always requires a fresh `home_all()` every process start -- see
+section 9 and `docs/potential_issues.md`.
 
-`dual_limit_switches` (section 5) only changes behavior in the `false`
-(software-homing) mode above -- native homing already never remeasures
-travel either way, so a one- or two-limit-switch joint homes identically
-under `use_linuxcnc_native_processes: true`.
+`dual_limit_switches` (section 5) doesn't change homing behavior at all --
+native homing never remeasures travel regardless of it (see
+`generate_ini()`); it only controls whether `generate_hal(simulate=True)`
+builds one or two fake limit switches, and cross-checks that
+`positive_limit_input` is set/unset consistently with it.
 
 ### Retract-to-zero: re-seeking the switch every retract, not just at boot
 
@@ -258,12 +250,12 @@ the true mechanical zero if a step was ever missed mid-session. Instead,
 `MotionCoordinator.retract_axis()` -> `Axis.retract_to_zero()` ->
 `LinuxCNCAxialInterface.start_retract_to_zero()`/`poll_retract_to_zero()`
 re-seeks the negative limit switch on **every** retract (not just the
-one-time `home_all()` at process start) and re-zeros from that physical
-reference, the same way initial homing does -- it just never touches the
-`max_limit`/travel established by that initial homing (a
-`dual_limit_switches` joint's *measured* travel must survive unchanged
-across every later retract, and a single-switch joint's configured
-`extended_distance` is likewise left untouched).
+one-time `home_all()` at process start, by re-running LinuxCNC's own native
+homing sequence) and re-zeros from that physical reference, the same way
+initial homing does -- it just never touches the `max_limit`/travel
+established by that initial homing (native homing never remeasures travel
+either way -- see section 7 -- so this holds regardless of
+`dual_limit_switches`).
 
 **Y is the one exception:** `JointConfiguration.retract_to` is set to `1.5`
 for it, because Y's retracted position is mechanically partway into its
@@ -283,12 +275,12 @@ This means the negative switch is now tripped deliberately, routinely,
 every single operation cycle -- not just once at boot the way the rest of
 this document originally described hard-limit trips ("this should never
 happen in normal operation," section 5's "What a tripped limit switch
-actually does"). The same `override_limits()` mechanism covers it
-(`_jog_toward_limit_switch()`, reused as-is), so it still never trips
-LinuxCNC's machine-wide hard-limit fault -- but it does mean the negative
-switch on X/Y/Z sees far more physical actuations over the life of the
-machine than a one-time homing switch would. Budget for that in switch
-selection/maintenance if this matters for your hardware.
+actually does"). The same `HOME_IGNORE_LIMITS` setting covers it (section
+7), so it still never trips LinuxCNC's machine-wide hard-limit fault -- but
+it does mean the negative switch on X/Y/Z sees far more physical actuations
+over the life of the machine than a one-time homing switch would. Budget
+for that in switch selection/maintenance if this matters for your
+hardware.
 
 ## 8. Motor configuration fields (`axis.json`)
 
@@ -312,7 +304,7 @@ motor, set these:
 | `retract_to` | The absolute position (native units, same zero as `retracted_distance`/`extended_distance`) this joint moves to on retract instead of re-seeking the negative limit switch -- `1.5` for Y (see section 7's "Retract-to-zero"). `null` (default) for every other joint. Must fall within `[-retracted_distance, extended_distance]` when both are configured. |
 | `inverted` | `true` if the joint moves the wrong physical direction. Flips the motor's direction in software; the normal fix for a reversed motor/lead, cheaper than re-wiring. |
 | `invert_negative_limit` / `invert_positive_limit` | `true` if that limit switch reads backwards from the normally-closed wiring in section 5. |
-| `home_sequence` | Only used when `use_linuxcnc_native_processes` is `true` (section 7). Leave at `-1` to home this joint on its own in "Home All"; LinuxCNC then defaults it to the joint number. |
+| `home_sequence` | See section 7. Leave at `-1` to home this joint on its own in "Home All"; LinuxCNC then defaults it to the joint number. |
 | `retracted_distance` | Positive distance from zero to this joint's retracted (negative-direction) soft limit, in inches (or degrees for A). For X/Y/Z: 0 -- the negative limit switch itself is both zero and the retracted end, so there's normally nothing beyond it. For A: `null` (section 6) -- A has no physical limit and no reference switch, so instead of carrying an arbitrary large sentinel value, this end's soft limit is genuinely disabled (a logged warning at load time says so). Becomes `-retracted_distance` in the generated INI's `MIN_LIMIT` when set; omitted (LinuxCNC then applies its own `-1e99` default) when `null`. |
 | `extended_distance` | Positive distance from zero to this joint's extended (positive-direction) soft limit, in inches (or degrees for A). For X/Y/Z: the one-directional distance from the negative limit switch. For A: `null`, same reasoning as `retracted_distance` above. Becomes the generated INI's `MAX_LIMIT` directly when set; omitted (LinuxCNC default `1e99`) when `null`. Setting either to `null` on any joint disables that end's software safety check the same way -- for X/Y/Z it also disables `lcaf.toolpathing.toolpath_slicer`'s matching travel-limit check, so only do this with a real physical limit switch or mechanical stop backing that end up. |
 | `step_length_ns`, `step_space_ns`, `direction_setup_ns`, `direction_hold_ns` | Stepper driver signal timing in nanoseconds. Defaults are usually fine; check your driver's datasheet if steps are missed or the motor is silent. |
@@ -326,7 +318,6 @@ motor, set these:
 | `linear_units`, `angular_units` | Leave as `"inch"`/`"degree"` -- see section 10. |
 | `default_linear_velocity_in_s`, `max_linear_velocity_in_s`, `max_linear_acceleration_in_s2` | Machine-wide linear jog/program defaults and cap, in/s and in/s². |
 | `default_angular_velocity_deg_s`, `max_angular_velocity_deg_s`, `max_angular_acceleration_deg_s2` | Same, for A, in deg/s and deg/s². |
-| `use_linuxcnc_native_processes` | See section 7. |
 | `linear_ferror_in`, `linear_min_ferror_in`, `angular_ferror_deg`, `angular_min_ferror_deg` | Following-error fault tolerances (how far behind commanded position LinuxCNC lets a joint fall before faulting). This is the only stall/skipped-step detection this machine has -- see `docs/potential_issues.md` -- so tune these against real measured following error during commissioning, not the shipped defaults. |
 | `base_period_ns`, `servo_period_ns` | LinuxCNC's realtime thread periods. |
 | `mesa_board_driver`, `mesa_board_config` | The `loadrt` driver name and arguments for the Mesa card. |
@@ -350,9 +341,8 @@ need to convert a toolpath file to inches.
 `[-retracted_distance, extended_distance]`:**
 
 - **X/Y/Z**: `retracted_distance` is 0, so the range is effectively `[0,
-  extended_distance]`. 0 is wherever homing finds the negative limit switch
-  (measured live in software-homing mode; wherever native homing lands in
-  native mode -- section 7). The toolpath planner's own X=0 is the clamp,
+  extended_distance]`. 0 is wherever LinuxCNC's own native homing lands
+  (section 7). The toolpath planner's own X=0 is the clamp,
   the same physical point (see [toolpath_slicer.md](toolpath_slicer.md)),
   so a normal toolpath needs no manual coordinate-shifting to fit this
   range.
@@ -413,8 +403,8 @@ config change.
   `linuxcnc.command()`/`stat()`/`error_channel()` connection -- LinuxCNC
   exposes one NML channel for the whole machine, not one per joint.
   `LinuxCNCAxialInterface` is the per-joint half: it knows how to
-  move/jog/home/read one joint, using either native or software homing
-  depending on `use_linuxcnc_native_processes` (section 7).
+  move/home/read one joint, always via LinuxCNC's own native homing
+  sequence (section 7).
 
 - **`axis.py`**'s `Axis` wraps one `LinuxCNCAxialInterface` with a small
   state machine of its own (`UNINITIALIZED -> READY -> MOVING/HOMING`, plus

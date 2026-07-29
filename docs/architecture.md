@@ -102,12 +102,11 @@ whole machine, not one per joint, so this is the one object that owns it.
 **LinuxCNCAxialInterface** -- one instance per joint, wrapping the shared
 LinuxCNCMachineInterface's connection for that joint alone.
 
-    - Per-joint status (position, velocity, enabled, in-position, faulted)
-    - MDI-issued motion (move, dwell, jog)
-    - Homing (native LinuxCNC homing or this project's own software
-      limit-switch homing, depending on machine.json's
-      use_linuxcnc_native_processes)
-    - Raw HAL limit-switch reads
+    - Per-joint status (position, velocity, enabled, in-position, faulted,
+      on-hard-limit)
+    - MDI-issued motion (move, dwell)
+    - Homing (always LinuxCNC's own native homing sequence -- see
+      docs/hardware_setup.md section 7)
 
 Note: No supervisory logic in either class.
 

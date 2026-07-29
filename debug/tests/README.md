@@ -38,27 +38,26 @@ here on its own.
   switch for a single-switch joint. Pure text generation, no `linuxcnc`/
   `hal` import, so no fakes needed.
 
-- **`test_linuxcnc_interface.py`** -- `LinuxCNCAxialInterface`'s software
-  homing path (`use_linuxcnc_native_processes: false`, this project's
-  default): that every deliberate jog toward a limit switch during homing
-  is bracketed with `command.override_limits()` (re-armed every heartbeat,
-  not just once) so LinuxCNC's own hard-limit fault doesn't trip on
-  intentional contact, and that `is_on_hard_limit()` correctly reads
+- **`test_linuxcnc_interface.py`** -- `LinuxCNCAxialInterface`'s native
+  homing path (this project always homes via LinuxCNC's own native homing
+  sequence -- see `docs/hardware_setup.md` section 7): `start_homing()`
+  calls `command.home(joint)`, `poll_homing()` waits (without blocking) for
+  `status.joint[n]['homed']`, raises on a reported fault or on timeout, and
+  never remeasures `max_limit` regardless of `dual_limit_switches`. Also
+  covers `is_on_hard_limit()` reading
   `status.joint[n]['min_hard_limit']`/`['max_hard_limit']` as a signal
-  distinct from `is_faulted()`. Also covers a `dual_limit_switches=False`
-  joint's single-switch homing (stops after the negative switch, trusts
-  configured `extended_distance`, never jogs positive), and
+  distinct from `is_faulted()`, and a `dual_limit_switches=False` joint's
+  homing (still just trusts configured `extended_distance`, same as the
+  dual-switch case). `RetractToZeroTests` covers
   `start_retract_to_zero()`/`poll_retract_to_zero()`: refuses to run before
-  initial homing or on a switchless joint, never remeasures `max_limit`,
-  overrides limits before jogging, can run again on a later retract, and
-  native mode reruns `command.home()`. `RetractToTests` covers the
+  initial homing or on a switchless joint, reruns native `command.home()`,
+  and never remeasures `max_limit`. `RetractToTests` covers the
   `retract_to` exception (this project's Y, set to `1.5`): retract instead
-  commands a plain MDI move to `retract_to`, completes on
-  `inpos` rather than a switch trip, never jogs or calls
-  `override_limits()`, never touches `position_offset_to_native`/
-  `max_limit`, and behaves the same under native homing mode. See
-  [docs/hardware_setup.md](../../docs/hardware_setup.md) sections 5 and 7
-  for the behavior this is pinning down, and why it matters.
+  commands a plain MDI move to `retract_to`, completes on `inpos` rather
+  than a re-home, and never touches `position_offset_to_native`/
+  `max_limit`. See [docs/hardware_setup.md](../../docs/hardware_setup.md)
+  sections 5 and 7 for the behavior this is pinning down, and why it
+  matters.
 
 - **`test_axis.py`** -- `Axis.poll()`: that a hard-limit-switch trip
   outside of homing moves the axis to `FAULT` (via `is_on_hard_limit()`),
@@ -75,7 +74,11 @@ here on its own.
   that `VERIFY_*_RETRACTED` waits for `Axis.is_retracted()` before
   advancing, that the full Z->Y->X sequence reaches `ROTATE_A`, and that a
   joint which never completed initial homing surfaces as a motion fault
-  instead of silently moving.
+  instead of silently moving. `SequentialHomingTests` covers `home_all()`:
+  axes home and immediately retract one at a time in joint order (not all
+  homed first, then all retracted), the switchless A joint skips retract
+  entirely, and `all_homed()` only reports True once every axis has both
+  homed and retracted -- not just off each axis's own raw homed flag.
 
 - **`conftest.py`** -- installs the fake `linuxcnc`/`hal` modules (below)
   into `sys.modules` before any test module is collected, so
