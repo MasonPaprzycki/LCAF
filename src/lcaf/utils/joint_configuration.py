@@ -258,8 +258,11 @@ class JointConfiguration:
     operation never commands this joint below it, so the switch is never
     re-triggered in normal use). None disables this end's soft limit
     entirely (logs a warning -- see __post_init__); generate_ini() then
-    omits MIN_LIMIT and no backoff move happens after homing. Becomes the
-    generated INI's MIN_LIMIT directly when set -- see min_travel."""
+    omits MIN_LIMIT and leaves HOME at 0.0 (no backoff after homing).
+    Becomes both the generated INI's MIN_LIMIT and HOME directly when set
+    -- see min_travel and generate_ini()'s HOME comment for why HOME (not a
+    separate move) is what actually performs the backoff, and why it must
+    equal MIN_LIMIT here rather than staying 0.0."""
 
     extended_distance: float | None = None
     """Positive distance from zero to this joint's extended (positive-
@@ -968,9 +971,28 @@ def generate_ini(machine: MachineConfiguration) -> str:
         # extended_distance (JointConfiguration warns about this already at
         # construction time) is rendered here by simply omitting the entry,
         # rather than this generator inventing its own placeholder number.
+        #
+        # HOME_OFFSET stays 0.0 -- that's what makes the negative limit
+        # switch itself the origin/datum. HOME is a *different* parameter:
+        # LinuxCNC's own native homing sequence makes a final move to HOME
+        # as its last step (after the search/latch establishes the datum),
+        # and status.joint[n]['homed'] only becomes true once that move
+        # completes (see homing.c's HOME_FINAL_MOVE_* states -> HOME_FINISHED).
+        # HOME = retracted_distance here means that final move *is* this
+        # joint's own backoff off the switch to its standoff position --
+        # LinuxCNC does it natively, no separate MDI move needed on this
+        # project's side. Critically, HOME must itself fall within
+        # [MIN_LIMIT, MAX_LIMIT] -- leaving HOME at 0.0 while MIN_LIMIT is
+        # retracted_distance (a positive floor above 0) would make this
+        # joint's own designated home position fall outside its own soft
+        # limits, which LinuxCNC's own homing sequence refuses to complete
+        # (no motion, homed never becomes true). A switchless joint (A) or
+        # a switched joint with retracted_distance left at 0/None just gets
+        # HOME=0.0, i.e. no separate backoff move.
+        home_value = joint.retracted_distance if joint.retracted_distance is not None else 0.0
         joint_entries = [
             ("TYPE", "ANGULAR" if joint.is_angular else "LINEAR"),
-            ("HOME", "0.0"),
+            ("HOME", _format_ini_value(home_value)),
             ("HOME_OFFSET", "0.0"),
             ("HOME_SEARCH_VEL", _format_ini_value(round(home_search_vel, 6))),
             ("HOME_LATCH_VEL", _format_ini_value(round(home_latch_vel, 6))),

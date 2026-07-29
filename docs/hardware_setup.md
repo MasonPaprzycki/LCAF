@@ -245,18 +245,34 @@ sequence. There is no shared reactive mechanism here to race against (that
 was specifically the software-homing/`override_limits()` design removed
 above), so nothing requires serializing the joints against each other.
 
-Once a given joint reports `status.joint[n]['homed']` (position 0, right
-at the negative switch), `LinuxCNCAxialInterface.poll_homing()`
-immediately commands that same joint to back off to its own configured
-`retracted_distance` (a plain MDI move, not a re-seek) before considering
-that joint's homing complete -- see
-`JointConfiguration.retracted_distance`'s docstring. This backoff is
-entirely per-joint and asynchronous: a joint that finishes homing (and
-backing off) sooner does not wait for any other joint. The same backoff
-also happens at the end of every later retract-to-zero
+The backoff to `retracted_distance` is entirely LinuxCNC's own doing, not a
+separate move this project commands: `generate_ini()` sets
+`HOME_OFFSET = 0.0` (the negative limit switch itself is the datum) but
+`HOME = retracted_distance` (not `0.0`) -- LinuxCNC's own native homing
+sequence makes a final move to `HOME` as its last step, after the
+search/latch phases establish the switch as zero, and
+`status.joint[n]['homed']` only becomes true once *that* move completes
+(see `homing.c`'s `HOME_FINAL_MOVE_*` states -> `HOME_FINISHED`). So by the
+time `LinuxCNCAxialInterface.poll_homing()` ever sees `homed=True`, the
+joint has already backed off the switch -- there is nothing further for
+this project's own code to command. This is per-joint and asynchronous
+purely because LinuxCNC's own homing sequence is: a joint that finishes
+sooner does not wait for any other joint. The same thing happens at the
+end of every later retract-to-zero
 (`LinuxCNCAxialInterface.start_retract_to_zero()`/
 `poll_retract_to_zero()`), since that re-runs the same native homing
 sequence.
+
+**This also matters for correctness, not just convenience:** `HOME` must
+itself fall within `[MIN_LIMIT, MAX_LIMIT]`. Leaving `HOME` at `0.0` while
+`MIN_LIMIT` is `retracted_distance` (a positive floor above `0`) makes the
+joint's own designated home position fall outside its own soft limits --
+LinuxCNC's native homing sequence then refuses to complete at all (no
+motion, `homed` never becomes true, the control process sits in
+`INITIALIZING` until its own homing timeout). `generate_ini()` avoids this
+by construction (`HOME` and `MIN_LIMIT` are both simply `retracted_distance`
+for a switched joint), but if you ever hand-edit a generated INI, keep this
+invariant in mind.
 
 `dual_limit_switches` (section 5) doesn't change homing behavior at all --
 native homing never remeasures travel regardless of it (see
@@ -330,7 +346,7 @@ motor, set these:
 | `inverted` | `true` if the joint moves the wrong physical direction. Flips the motor's direction in software; the normal fix for a reversed motor/lead, cheaper than re-wiring. |
 | `invert_negative_limit` / `invert_positive_limit` | `true` if that limit switch reads backwards from the normally-closed wiring in section 5. |
 | `home_sequence` | See section 7. Leave at `-1` to home this joint on its own in "Home All"; LinuxCNC then defaults it to the joint number. |
-| `retracted_distance` | Positive position this joint backs off to immediately after LinuxCNC's native homing finds its negative limit switch (which always sits at 0), in inches (or degrees for A) -- its standoff/parked position, and this end's soft-limit floor (`0.25` for X/Y/Z: enough clearance that normal operation never re-triggers the switch). For A: `null` (section 6) -- A has no physical limit, no reference switch, and so nothing to back off from either; instead of carrying an arbitrary large sentinel value, this end's soft limit is genuinely disabled (a logged warning at load time says so). Becomes the generated INI's `MIN_LIMIT` directly when set; omitted (LinuxCNC then applies its own `-1e99` default) when `null`. Must be less than `extended_distance` when both are set. |
+| `retracted_distance` | Positive position this joint backs off to immediately after LinuxCNC's native homing finds its negative limit switch (which always sits at 0), in inches (or degrees for A) -- its standoff/parked position, and this end's soft-limit floor (`0.25` for X/Y/Z: enough clearance that normal operation never re-triggers the switch). For A: `null` (section 6) -- A has no physical limit, no reference switch, and so nothing to back off from either; instead of carrying an arbitrary large sentinel value, this end's soft limit is genuinely disabled (a logged warning at load time says so). Becomes both the generated INI's `MIN_LIMIT` *and* `HOME` when set (see section 7 -- `HOME` is what actually makes LinuxCNC's native homing back off to this position); omitted from `MIN_LIMIT` (LinuxCNC then applies its own `-1e99` default) and `HOME` left at `0.0` when `null`. Must be less than `extended_distance` when both are set. |
 | `extended_distance` | Positive distance from zero to this joint's extended (positive-direction) soft limit, in inches (or degrees for A). For X/Y/Z: the one-directional distance from the negative limit switch. For A: `null`, same reasoning as `retracted_distance` above. Becomes the generated INI's `MAX_LIMIT` directly when set; omitted (LinuxCNC default `1e99`) when `null`. Setting either to `null` on any joint disables that end's software safety check the same way -- for X/Y/Z it also disables `lcaf.toolpathing.toolpath_slicer`'s matching travel-limit check, so only do this with a real physical limit switch or mechanical stop backing that end up. |
 | `step_length_ns`, `step_space_ns`, `direction_setup_ns`, `direction_hold_ns` | Stepper driver signal timing in nanoseconds. Defaults are usually fine; check your driver's datasheet if steps are missed or the motor is silent. |
 

@@ -45,17 +45,16 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
 
     def advance_retract(self, axis_name: str):
         """Drive one axis's RETRACTING state to completion via its own
-        poll() (native retract-to-zero re-runs command.home(), then backs
-        off to retracted_distance -- see
-        LinuxCNCAxialInterface.start_retract_to_zero()/
-        _start_backoff_from_switch()). The fake stat's 'inpos' defaults
-        True, so the backoff move completes on the poll() right after it's
-        issued -- no explicit position bookkeeping needed."""
+        poll() (native retract-to-zero re-runs command.home() -- see
+        LinuxCNCAxialInterface.start_retract_to_zero()). LinuxCNC's own
+        final move-to-HOME (generate_ini() sets HOME=retracted_distance)
+        already backs the joint off its switch before ever reporting
+        homed=True, so setting the fake stat's 'homed' flag alone is
+        enough -- no separate backoff step to drive here."""
         joint_num = self.motion.axes[axis_name].joint
         self.motion.axes[axis_name].poll()  # issues command.home() for retract
         self.stat.joint[joint_num]["homed"] = True
-        self.motion.axes[axis_name].poll()  # observes homed -> issues backoff move
-        self.motion.axes[axis_name].poll()  # observes in-position -> retract complete
+        self.motion.axes[axis_name].poll()  # observes homed -> retract complete
 
     def start_operation(self) -> ToolpathOperation:
         operation = ToolpathOperation(
@@ -124,10 +123,12 @@ class ConcurrentHomingTests(unittest.TestCase):
     safe to run concurrently (HOME_IGNORE_LIMITS is evaluated inside
     LinuxCNC's own compiled homing state machine, per joint, not a shared
     reactive mechanism -- see MotionCoordinator.home_all()'s docstring).
-    Each axis then backs off to its own configured retracted_distance
-    immediately once its own homing completes
-    (LinuxCNCAxialInterface.poll_homing()/_start_backoff_from_switch()),
-    fully independently of the other axes -- not gated on any of them.
+    Each axis then backs off to its own configured retracted_distance as
+    part of LinuxCNC's own native homing sequence (generate_ini() sets
+    [JOINT_n]HOME=retracted_distance, so LinuxCNC's own final move-to-HOME
+    step does this natively -- status.joint[n]['homed'] only becomes true
+    once that move completes), fully independently of the other axes -- not
+    gated on any of them.
     """
 
     _MAX_TICKS = 8
@@ -149,13 +150,11 @@ class ConcurrentHomingTests(unittest.TestCase):
 
     def run_all_axes_to_completion(self):
         """
-        Poll every axis's native homing (then backoff) to completion in
-        lockstep -- feeding each joint's own fake 'homed' flag whenever its
-        own axial_interface reports a fresh command.home() in flight
+        Poll every axis's native homing to completion in lockstep --
+        feeding each joint's own fake 'homed' flag whenever its own
+        axial_interface reports a fresh command.home() in flight
         (_homing_phase == "native_wait"), so all four progress together
-        rather than one waiting on another. The fake stat's 'inpos'
-        defaults True, so each backoff move completes on the poll() right
-        after it's issued.
+        rather than one waiting on another.
         """
         for _ in range(self._MAX_TICKS):
             for axis in self.motion.axes.values():

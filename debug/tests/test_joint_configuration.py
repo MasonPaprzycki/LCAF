@@ -218,6 +218,71 @@ class NullableTravelLimitTests(unittest.TestCase):
             make_joint(extended_distance=0.0)
 
 
+class NativeHomeValueTests(unittest.TestCase):
+    """
+    [JOINT_n]HOME must equal retracted_distance (not 0.0) for a switched
+    joint with a configured retracted_distance -- LinuxCNC's own native
+    homing sequence makes a final move to HOME as its last step (after
+    HOME_OFFSET=0.0 establishes the negative limit switch itself as the
+    datum), so this is what actually backs the joint off the switch to its
+    standoff position; there is no separate Python-side move for this (see
+    LinuxCNCAxialInterface.poll_homing()). Critically, HOME must fall
+    within [MIN_LIMIT, MAX_LIMIT] -- leaving HOME at 0.0 while MIN_LIMIT is
+    a positive retracted_distance made the joint's own designated home
+    position fall outside its own soft limits, which LinuxCNC's homing
+    sequence refuses to complete at all (no motion, homed never becomes
+    true) -- this is a regression guard against reintroducing that.
+    """
+
+    def _home_value(self, ini_text: str, section: str) -> float:
+        section_text = ini_text.split(f"[{section}]")[1].split("[")[0]
+        for line in section_text.splitlines():
+            if line.startswith("HOME "):
+                return float(line.split("=")[1].strip())
+        raise AssertionError(f"No HOME line found in [{section}]")
+
+    def test_home_equals_retracted_distance_for_a_switched_joint(self):
+        joint = make_joint(retracted_distance=0.25, extended_distance=9.0)
+        machine = MachineConfiguration(machine_name="TestMachine", joints=[joint])
+        ini_text = generate_ini(machine)
+
+        self.assertEqual(self._home_value(ini_text, "JOINT_0"), 0.25)
+
+    def test_home_is_zero_when_retracted_distance_is_zero(self):
+        joint = make_joint(retracted_distance=0.0, extended_distance=9.0)
+        machine = MachineConfiguration(machine_name="TestMachine", joints=[joint])
+        ini_text = generate_ini(machine)
+
+        self.assertEqual(self._home_value(ini_text, "JOINT_0"), 0.0)
+
+    def test_home_is_zero_for_switchless_joint_with_null_retracted_distance(self):
+        joint = make_joint(
+            joint=3, axis="A", is_angular=True, has_limit_switches=False,
+            negative_limit_input=None, positive_limit_input=None,
+            retracted_distance=None, extended_distance=None,
+        )
+        machine = MachineConfiguration(machine_name="TestMachine", joints=[joint])
+        ini_text = generate_ini(machine)
+
+        self.assertEqual(self._home_value(ini_text, "JOINT_3"), 0.0)
+
+    def test_home_is_within_min_and_max_limit_for_every_real_joint(self):
+        # Regression guard for the actual bug: HOME must never fall outside
+        # [MIN_LIMIT, MAX_LIMIT], or LinuxCNC's own native homing silently
+        # refuses to complete (no motion at all).
+        machine = load_machine_configuration(REPO_ROOT / "configs" / "machine.json")
+        ini_text = generate_ini(machine)
+
+        for joint in machine.joints:
+            if joint.retracted_distance is None:
+                continue  # No MIN_LIMIT rendered -- LinuxCNC defaults to -1e99, always satisfied.
+            home = self._home_value(ini_text, joint.ini_joint_section)
+            self.assertGreaterEqual(
+                home, joint.min_travel,
+                f"{joint.axis}: HOME ({home}) is below MIN_LIMIT ({joint.min_travel})",
+            )
+
+
 class RetractToValidationTests(unittest.TestCase):
     """
     JointConfiguration.retract_to (this project's Y axis, set to 1.5 in
