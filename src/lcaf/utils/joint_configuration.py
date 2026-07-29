@@ -684,13 +684,16 @@ def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
                     emit(f"addf complim_{joint.axis.lower()}_pos servo-thread")
     else:
         board_name = joints[0].mesa_stepgen.split(".stepgen.")[0]
+        # capture-position/update-freq are per-board stepgen-module functions
+        # (no channel number) -- each processes every enabled stepgen.NN
+        # channel on this board internally. There is no per-channel
+        # "stepgen.NN.capture-position" HAL function; addf'ing one per joint
+        # fails with "function ... not found". See hostmot2(9).
         emit(f"addf {board_name}.read servo-thread")
+        emit(f"addf {board_name}.stepgen.capture-position servo-thread")
         emit("addf motion-command-handler servo-thread")
         emit("addf motion-controller servo-thread")
-
-        for joint in joints:
-            emit(f"addf {joint.mesa_stepgen}.capture-position servo-thread")
-
+        emit(f"addf {board_name}.stepgen.update-freq servo-thread")
         emit(f"addf {board_name}.write servo-thread")
 
     emit()
