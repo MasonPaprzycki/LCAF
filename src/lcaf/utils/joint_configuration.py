@@ -683,14 +683,15 @@ def generate_hal(machine: MachineConfiguration, simulate: bool = False) -> str:
                 if joint.dual_limit_switches:
                     emit(f"addf complim_{joint.axis.lower()}_pos servo-thread")
     else:
-        emit("addf hm2_read-request servo-thread")
+        board_name = joints[0].mesa_stepgen.split(".stepgen.")[0]
+        emit(f"addf {board_name}.read servo-thread")
         emit("addf motion-command-handler servo-thread")
         emit("addf motion-controller servo-thread")
 
         for joint in joints:
             emit(f"addf {joint.mesa_stepgen}.capture-position servo-thread")
 
-        emit("addf hm2_write servo-thread")
+        emit(f"addf {board_name}.write servo-thread")
 
     emit()
     emit("net watchdog-reset <= motion.motion-enabled")
