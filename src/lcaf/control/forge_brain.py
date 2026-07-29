@@ -340,8 +340,17 @@ class ForgeBrain:
         if not interface.machine_on():
             interface.machine_on_command()
             time.sleep(1)
+            interface.update()
 
-        
+            if not interface.machine_on():
+                self.set_fault(
+                    "Machine did not turn ON (LinuxCNC rejected STATE_ON -- still in ESTOP, "
+                    "or another interlock is blocking it). Homing was not attempted: without "
+                    "this check, jog commands issued while still OFF are silently ignored by "
+                    "LinuxCNC, so the machine would sit motionless until the homing timeout."
+                )
+                return
+
         if not interface.all_homed():
 
             faulted_axis = self.motion.first_faulted_axis()

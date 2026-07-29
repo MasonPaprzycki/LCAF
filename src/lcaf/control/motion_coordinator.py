@@ -178,6 +178,16 @@ class MotionCoordinator:
 
         self.interface.poll()
 
+        # LinuxCNC's own NML error channel is where a rejected jog/home
+        # command's real reason lands as text (e.g. "joint 0 exceeds
+        # positive limit", "Can't jog joint 0, not enabled", "joint N on
+        # limit switch error") -- get_errors() drains it, but nothing
+        # previously logged what it drained, so a command LinuxCNC silently
+        # refused (motors never move, no exception raised here) left no
+        # trace in this project's own log. See docs/potential_issues.md.
+        for error in self.interface.get_errors():
+            self.logger.error(f"LinuxCNC error: {error}")
+
         for name, axis in self.axes.items():
 
             try:
