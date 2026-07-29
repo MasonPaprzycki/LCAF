@@ -41,7 +41,7 @@ optionally, one enable output and a pair of limit-switch inputs:
 
 | Joint | Axis | Motor wiring (TB2/TB3) | Enable output (TB6) | Limit switches (TB6) |
 |---|---|---|---|---|
-| 0 | X | TB2 pins 2-5 (STEP0, DIR0) | OUTPUT0 (pin 17) | INPUT0 neg (pin 1), INPUT1 pos (pin 2) |
+| 0 | X   | TB2 pins 2-5 (STEP0, DIR0) | OUTPUT0 (pin 17) | INPUT0 neg (pin 1), INPUT1 pos (pin 2) |
 | 1 | Y | TB2 pins 8-11 (STEP1, DIR1) | OUTPUT1 (pin 18) | INPUT2 neg (pin 3), INPUT3 pos (pin 4) |
 | 2 | Z | TB2 pins 14-17 (STEP2, DIR2) | OUTPUT2 (pin 19) | INPUT4 neg (pin 5), INPUT5 pos (pin 6) |
 | 3 | A | TB3 pins 2-5 (STEP4, DIR4) | OUTPUT3 (pin 20) | none -- A is continuous, see section 5 |
@@ -117,7 +117,7 @@ limit." A has no limit switches; see section 6 for why.
 Use the table in section 1 for which TB6 pin is which joint's negative/
 positive input. If your switches are wired the opposite way (normally
 open, or you can't rewire them), set `invert_negative_limit` /
-`invert_positive_limit` for that joint in `axis.json` instead of
+`invert_positive_limit` as false for that joint in `axis.json` instead of
 rewiring. The two switches on a joint must be different physical inputs --
 `JointConfiguration` refuses to load an `axis.json` that wires
 `negative_limit_input` and `positive_limit_input` to the same pin, since
