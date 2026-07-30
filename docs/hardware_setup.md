@@ -315,6 +315,24 @@ position is mechanically at the far end of its travel, not the near one.
 `Axis.retract()` picks the target once, in `Axis.__init__`
 (`self.retracted_position`), from whichever this joint's `axis.json` sets.
 
+`retracted_distance`/`extended_distance` are native units (inches here --
+see `JointConfiguration`'s docstring), but `Axis.move()`/`retract()` always
+command in machine units (mm), the same space `ToolpathOperation`'s own
+`x`/`y`/`die_gap` are in -- `Axis.__init__` converts with
+`to_machine_units()` before storing `retracted_position`. Real-hardware
+testing found this conversion missing once already: a retract sent the raw
+native value straight through as an mm-valued MDI target (e.g. X's
+`retracted_distance=0.25` commanded `X0.2500` under `G21`, i.e. `0.25mm` ≈
+`0.0098in` -- 25x short of the intended `0.25in` standoff, and below
+`MIN_LIMIT`), which LinuxCNC rejected outright as beyond the negative
+limit. A non-flip joint's retract target is also exactly its own
+`MIN_LIMIT` once correctly converted (`extended_distance`/`MAX_LIMIT` for a
+`flip_retraction` joint) -- `Axis.__init__` nudges it a hair inside that
+limit (`LinuxCNCAxialInterface._RESTATED_AXIS_SAFETY_MARGIN_MM`, the same
+margin/reasoning `_restated_position_machine_units()` below already uses)
+so an ordinary floating-point round-trip can't land it a hair outside,
+with no room to absorb that right at the limit.
+
 Because these are open-loop stepper joints with no position feedback
 (`docs/potential_issues.md`), this command trusts whatever position this
 project's own bookkeeping has accumulated since the last `home_all()` --

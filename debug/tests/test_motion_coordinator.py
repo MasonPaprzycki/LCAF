@@ -115,10 +115,35 @@ class RetractStatesUsePlainMovesTests(unittest.TestCase):
     def test_y_axis_retracts_to_extended_distance_per_real_config(self):
         # configs/axis.json sets flip_retraction=true for Y (mechanically
         # retracted at the far end of its travel, not the near one) -- see
-        # docs/hardware_setup.md section 7.
+        # docs/hardware_setup.md section 7. retracted_position is in
+        # machine units (mm), converted from extended_distance's native
+        # unit (inches), not the raw native value -- see Axis.__init__.
         y_joint = self.machine_config.joint_by_axis("Y")
+        y_axis = self.motion.axes["y"]
         self.assertTrue(y_joint.flip_retraction)
-        self.assertEqual(self.motion.axes["y"].retracted_position, y_joint.extended_distance)
+        expected_mm = y_axis.axial_interface.to_machine_units(y_joint.extended_distance)
+        self.assertAlmostEqual(y_axis.retracted_position, expected_mm, delta=0.02)
+
+    def test_retract_targets_are_within_soft_limits_for_every_real_joint(self):
+        # Regression guard for the actual bug: retracted_position must be a
+        # machine-units (mm) value inside [MIN_LIMIT, MAX_LIMIT], not a raw
+        # native-unit (inch) value commanded directly as mm -- that
+        # previously landed X/Z's retract 25x short of the intended standoff
+        # and below MIN_LIMIT, which LinuxCNC rejected outright.
+        for name, axis in self.motion.axes.items():
+            if axis.retracted_position is None:
+                continue  # A never retracts and has no configured target.
+
+            min_mm = axis.axial_interface.to_machine_units(axis.axial_interface.joint.retracted_distance)
+            max_mm = axis.axial_interface.to_machine_units(axis.axial_interface.joint.extended_distance)
+            self.assertGreaterEqual(
+                axis.retracted_position, min_mm,
+                f"{name}: retracted_position ({axis.retracted_position}) is below MIN_LIMIT ({min_mm})",
+            )
+            self.assertLessEqual(
+                axis.retracted_position, max_mm,
+                f"{name}: retracted_position ({axis.retracted_position}) is above MAX_LIMIT ({max_mm})",
+            )
 
 
 class MultiAxisMdiWordTests(unittest.TestCase):

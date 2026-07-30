@@ -115,7 +115,13 @@ class RetractionTests(unittest.TestCase):
         self.axis.axial_interface.axis_homed = True
 
     def test_retract_targets_retracted_distance_by_default(self):
-        self.assertEqual(self.axis.retracted_position, self.joint.retracted_distance)
+        # retracted_position is in machine units (mm), converted from
+        # retracted_distance's native unit (inches) -- see __init__ -- plus
+        # a small inward margin since retracted_distance is also exactly
+        # this joint's own MIN_LIMIT.
+        expected = self.axis.axial_interface.to_machine_units(self.joint.retracted_distance)
+        self.assertAlmostEqual(self.axis.retracted_position, expected, delta=0.02)
+        self.assertGreater(self.axis.retracted_position, expected)
 
     def test_retract_completes_once_joint_reports_in_position(self):
         self.stat.joint[self.joint.joint]["inpos"] = False
@@ -190,8 +196,16 @@ class FlipRetractionTests(unittest.TestCase):
         self.axis.axial_interface.axis_homed = True
 
     def test_retract_targets_extended_distance(self):
-        self.assertEqual(self.axis.retracted_position, self.joint.extended_distance)
-        self.assertNotEqual(self.axis.retracted_position, self.joint.retracted_distance)
+        # retracted_position is in machine units (mm), converted from
+        # extended_distance's native unit (inches) -- see __init__ -- minus
+        # a small inward margin since extended_distance is also exactly
+        # this joint's own MAX_LIMIT.
+        expected = self.axis.axial_interface.to_machine_units(self.joint.extended_distance)
+        self.assertAlmostEqual(self.axis.retracted_position, expected, delta=0.02)
+        self.assertLess(self.axis.retracted_position, expected)
+
+        not_expected = self.axis.axial_interface.to_machine_units(self.joint.retracted_distance)
+        self.assertNotAlmostEqual(self.axis.retracted_position, not_expected, delta=1.0)
 
     def test_retract_completes_once_joint_reports_in_position(self):
         self.stat.joint[self.joint.joint]["inpos"] = False

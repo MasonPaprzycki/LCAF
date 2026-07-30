@@ -31,14 +31,38 @@ class Axis:
 
     def __init__(self, joint_config: JointConfiguration, machine: LinuxCNCMachineInterface):
 
-        if joint_config.flip_retraction:
-            self.retracted_position = joint_config.extended_distance
-        else:
-            self.retracted_position = joint_config.retracted_distance
-
         self.axis = joint_config.axis.lower()
         self.joint = joint_config.joint
         self.axial_interface = LinuxCNCAxialInterface(joint_config, machine)
+
+        # retracted_distance/extended_distance are native units (inches for
+        # a linear joint -- see JointConfiguration's docstring), but
+        # retract()/poll() command through axial_interface.move() using the
+        # same machine-unit (mm) space as Axis.move()/ToolpathOperation --
+        # using the native value directly here previously sent e.g. X's
+        # retracted_distance=0.25 (inches) as a G21 target of 0.25mm
+        # (=0.0098in), 25x short of the intended 0.25in standoff and well
+        # below MIN_LIMIT, which LinuxCNC rejected outright as beyond the
+        # negative limit. A non-flip joint's target is also exactly its own
+        # MIN_LIMIT (retracted_distance) once converted -- nudging it a hair
+        # inside the limit (same margin/reasoning as
+        # LinuxCNCAxialInterface._restated_position_machine_units()) avoids
+        # an ordinary floating-point round-trip landing a hair outside it,
+        # with no room to absorb that since the value already sits exactly
+        # on the limit.
+        if joint_config.flip_retraction:
+            native_retract_target = joint_config.extended_distance
+        else:
+            native_retract_target = joint_config.retracted_distance
+
+        if native_retract_target is None:
+            self.retracted_position = None
+        else:
+            margin = LinuxCNCAxialInterface._RESTATED_AXIS_SAFETY_MARGIN_MM
+            converted = self.axial_interface.to_machine_units(native_retract_target)
+            self.retracted_position = (
+                converted - margin if joint_config.flip_retraction else converted + margin
+            )
 
         self.status = AxisStatus(self.axis)
         self.logger = logging.getLogger(f"Motor-{self.axis}")
