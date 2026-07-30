@@ -202,14 +202,28 @@ tradeoff, since it has no physical limit to check against anyway.
 
 ## 7. Homing: always LinuxCNC's own native homing sequence
 
-This project always homes through LinuxCNC's own native homing sequence
-(`command.home(joint)`, then waiting for `status.joint[n]['homed']`) --
-`generate_hal()` wires each switched joint's negative-limit input to
-LinuxCNC's `home-sw-in` pin too, and `generate_ini()` fills in real
-`HOME_SEARCH_VEL`/`HOME_LATCH_VEL`/`HOME_SEQUENCE` values, including
-`HOME_IGNORE_LIMITS = YES` for every joint (so a switched joint's own
-home-seek can drive into the same switch its hard limit also watches
-without LinuxCNC's homing state machine faulting on it).
+This project always homes through LinuxCNC's own native homing sequence --
+specifically its own "Home All" (`command.home(-1)`, issued once,
+machine-wide, by `LinuxCNCMachineInterface.home_all_command()`), the exact
+same command the Axis GUI's own "Home All" button sends, then waiting for
+each joint's own `status.joint[n]['homed']`. `generate_hal()` wires each
+switched joint's negative-limit input to LinuxCNC's `home-sw-in` pin too,
+and `generate_ini()` fills in real `HOME_SEARCH_VEL`/`HOME_LATCH_VEL`/
+`HOME_SEQUENCE` values, including `HOME_IGNORE_LIMITS = YES` for every
+joint (so a switched joint's own home-seek can drive into the same switch
+its hard limit also watches without LinuxCNC's homing state machine
+faulting on it).
+
+This project previously issued a separate `command.home(joint)` for each
+joint individually instead of the `-1` form -- removed, since it was an
+unnecessary reimplementation of exactly what "Home All" already does
+natively, and real-hardware testing found it didn't behave identically to
+the GUI's own "Home All" button (which operators had already confirmed
+works correctly, including the `home_sequence`-grouped X+Y-then-Z ordering
+in this project's own `axis.json`) -- the individually-numbered form went
+out cleanly over the shared NML command channel but never produced any
+physical motion. `command.home(-1)` sidesteps that gap entirely by using
+the identical mechanism as the button.
 
 This project previously also supported driving homing itself in Python
 (jogging each joint to its limit switches directly, with
@@ -231,17 +245,19 @@ Machine coordinate 0 on X/Y/Z is wherever the negative limit switch is, and
 the machine always requires a fresh `home_all()` every process start -- see
 section 9 and `docs/potential_issues.md`.
 
-### X, Y, and Z home concurrently, then each backs off independently
+### Home All is one command; each joint backs off independently afterward
 
-`MotionCoordinator.home_all()` issues `command.home(joint)` for every axis
-at once -- X, Y, Z, and A all start homing in the same heartbeat, not one
-at a time. This is safe precisely because `HOME_IGNORE_LIMITS` is evaluated
-per joint inside LinuxCNC's own compiled homing state machine: one joint's
-switch tripping (and LinuxCNC clearing/re-arming whatever internal state
-that involves) has no effect on any other joint's own independent homing
-sequence. There is no shared reactive mechanism here to race against (that
-was specifically the software-homing/`override_limits()` design removed
-above), so nothing requires serializing the joints against each other.
+`MotionCoordinator.home_all()` issues exactly one command --
+`LinuxCNCMachineInterface.home_all_command()`'s `command.home(-1)` -- and
+LinuxCNC's own task-level homing sequencer takes it from there, honoring
+each joint's own `[JOINT_n]HOME_SEQUENCE` (this project's X and Y share
+sequence `1` and home together; Z is sequence `2` and follows; see
+`axis.json`) as one contiguous native sequence, identically to clicking
+"Home All" in the Axis GUI. This project's own code never re-implements
+that sequencing or ordering -- each `Axis` just watches its own
+`status.joint[n]['homed']`
+(`LinuxCNCAxialInterface.begin_homing_wait()`/`poll_homing()`), without
+issuing any command of its own, until LinuxCNC's own sequencer gets to it.
 
 The backoff to `retracted_distance` is entirely LinuxCNC's own doing, not a
 separate move this project commands: `generate_ini()` sets
@@ -253,13 +269,15 @@ search/latch phases establish the switch as zero, and
 (see `homing.c`'s `HOME_FINAL_MOVE_*` states -> `HOME_FINISHED`). So by the
 time `LinuxCNCAxialInterface.poll_homing()` ever sees `homed=True`, the
 joint has already backed off the switch -- there is nothing further for
-this project's own code to command. This is per-joint and asynchronous
-purely because LinuxCNC's own homing sequence is: a joint that finishes
-sooner does not wait for any other joint. The same thing happens at the
-end of every later retract-to-zero
+this project's own code to command. Joints in different `HOME_SEQUENCE`
+groups finish at different times purely because LinuxCNC's own sequencer
+moves on to the next group as soon as the current one finishes; this
+project's own polling doesn't gate one axis on another either way. A
+later retract-to-zero
 (`LinuxCNCAxialInterface.start_retract_to_zero()`/
-`poll_retract_to_zero()`), since that re-runs the same native homing
-sequence.
+`poll_retract_to_zero()`) is different: it re-seeks one specific joint by
+number (`command.home(joint)`, not `-1`), since only that one joint is
+retracting at that point in a toolpath operation, not the whole machine.
 
 **This also matters for correctness, not just convenience:** `HOME` must
 itself fall within `[MIN_LIMIT, MAX_LIMIT]`. Leaving `HOME` at `0.0` while
@@ -442,10 +460,12 @@ config change.
 - **`linuxcnc_interface.py`** is the only place that imports `linuxcnc`/
   `hal`. `LinuxCNCMachineInterface` owns the single shared
   `linuxcnc.command()`/`stat()`/`error_channel()` connection -- LinuxCNC
-  exposes one NML channel for the whole machine, not one per joint.
-  `LinuxCNCAxialInterface` is the per-joint half: it knows how to
-  move/home/read one joint, always via LinuxCNC's own native homing
-  sequence (section 7).
+  exposes one NML channel for the whole machine, not one per joint -- and
+  issues the one machine-wide native "Home All" (`home_all_command()`, see
+  section 7). `LinuxCNCAxialInterface` is the per-joint half: it knows how
+  to move/read one joint and wait out its own share of that Home All
+  (`begin_homing_wait()`/`poll_homing()`), plus re-home itself individually
+  for a later retract-to-zero.
 
 - **`axis.py`**'s `Axis` wraps one `LinuxCNCAxialInterface` with a small
   state machine of its own (`UNINITIALIZED -> READY -> MOVING/HOMING`, plus

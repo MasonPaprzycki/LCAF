@@ -39,7 +39,7 @@ class LinuxCNCMachineInterface:
         """
         Give the machine interface the set of Axis objects it should
         consult for all_homed(). This project tracks "homed" through each
-        Axis's own bookkeeping (which LinuxCNCAxialInterface.start_homing/
+        Axis's own bookkeeping (which LinuxCNCAxialInterface.begin_homing_wait/
         poll_homing keeps in sync with status.joint[n]['homed']) rather than
         reading LinuxCNC's status.homed directly here, so ForgeBrain always
         has one consistent source of truth.
@@ -86,20 +86,35 @@ class LinuxCNCMachineInterface:
     def ensure_manual_mode(self):
         """
         Switch the single shared NML command channel to MANUAL mode once,
-        machine-wide. Every joint's native homing/retract-to-zero
-        (LinuxCNCAxialInterface.start_homing/start_retract_to_zero) requires
-        MANUAL mode -- previously each axis re-issued this same mode
-        switch + wait_complete() itself, redundantly, every time its own
-        homing lazily kicked off. Since all axes share this one connection
-        (LinuxCNC exposes one command channel for the whole machine, not one
-        per joint) and MotionCoordinator.home_all() starts every axis
-        homing within the same heartbeat, that meant up to four back-to-back
-        mode-switch round trips over the one channel with no gap between
-        them, right as the first joint's search move was starting. Calling
-        this once up front (home_all()) avoids that redundant churn.
+        machine-wide. Native homing/retract-to-zero
+        (home_all_command() below, LinuxCNCAxialInterface.
+        start_retract_to_zero()) requires MANUAL mode.
         """
         self.command.mode(linuxcnc.MODE_MANUAL)
         self.command.wait_complete()
+
+    def home_all_command(self):
+        """
+        Issue LinuxCNC's own native "Home All" once, machine-wide --
+        command.home(-1), the exact same command the Axis GUI's own "Home
+        All" button sends. LinuxCNC's own task-level homing sequencer then
+        drives every joint's search and backoff itself, honoring each
+        joint's own [JOINT_n]HOME_SEQUENCE (see generate_ini()) exactly the
+        way that button does.
+
+        This project previously re-issued a separate command.home(joint)
+        call per joint instead, from each Axis's own lazily-triggered
+        start_homing() -- removed, since it was an unnecessary
+        reimplementation of exactly what "Home All" already does natively,
+        and didn't behave identically to the GUI button operators had
+        already confirmed worked (see MotionCoordinator.home_all()). Every
+        joint still independently backs off to its own configured
+        retracted_distance as part of this same native sequence
+        (HOME=retracted_distance, generate_ini()) -- nothing further for
+        this project's own code to command once this one call is issued.
+        """
+        self.ensure_manual_mode()
+        self.command.home(-1)
 
     def get_errors(self):
         errors = []
@@ -148,11 +163,11 @@ class LinuxCNCAxialInterface:
         # (native homing never remeasures travel -- see generate_ini() and
         # JointConfiguration.dual_limit_switches).
 
-        # Homing phase state -- see start_homing()/poll_homing(). None means
-        # no homing in progress. Homing never blocks the caller: each
+        # Homing phase state -- see begin_homing_wait()/poll_homing(). None
+        # means no homing in progress. Homing never blocks the caller: each
         # poll_homing() call advances at most one phase transition, so the
         # control loop's heartbeat keeps running (telemetry, other axes'
-        # polling, ESTOP handling) while command.home() is in flight.
+        # polling, ESTOP handling) while LinuxCNC's own Home All is in flight.
         self._homing_phase: str | None = None
         self._homing_start_time: float = 0.0
         self._homing_timeout: float = 60.0
@@ -297,27 +312,28 @@ class LinuxCNCAxialInterface:
         return self.status.joint_position[self.joint.joint]
 
     # homing
-    def start_homing(self, timeout: float = 60.0):
+    def begin_homing_wait(self, timeout: float = 60.0):
         """
-        Begin LinuxCNC's own native homing for this joint without blocking:
-        calls command.home(joint) and returns immediately. Call
-        poll_homing() every subsequent heartbeat until it returns True (or
-        raises) to actually advance and detect completion.
+        Begin watching this joint's own status.joint[n]['homed'] for
+        LinuxCNC's native "Home All" to home it, without blocking and
+        without issuing any command itself: LinuxCNCMachineInterface.
+        home_all_command() already issued a single machine-wide
+        command.home(-1) covering every joint (see
+        MotionCoordinator.home_all()) -- this is this joint's own share of
+        that one shared command, not a separate one. Call poll_homing()
+        every subsequent heartbeat until it returns True (or raises) to
+        actually advance and detect completion, exactly as if this joint
+        had been homed by its own directly-numbered command.home(joint) --
+        status.joint[n]['homed'] means the same thing either way.
 
         Homing speed comes entirely from the generated INI's
         HOME_SEARCH_VEL/HOME_LATCH_VEL (see generate_ini()), not from this
         method -- there is no Python-side jog speed to configure here.
-
-        Requires the shared command channel to already be in MANUAL mode --
-        see LinuxCNCMachineInterface.ensure_manual_mode(), called once by
-        MotionCoordinator.home_all() before any axis's homing starts, rather
-        than every axis re-issuing that same machine-wide mode switch itself.
         """
         self.homing_ever_been_intialized = True
         self._homing_timeout = timeout
         self.poll()
 
-        self.command.home(self.joint.joint)
         self._homing_phase = "native_wait"
         self._homing_start_time = time.monotonic()
 
@@ -390,11 +406,15 @@ class LinuxCNCAxialInterface:
     # its "retract" is a plain move to that configured position instead,
     # with no switch to re-reference against -- see start_retract_to_zero().
     #
-    # Deliberately separate from _homing_phase/start_homing/poll_homing:
+    # Deliberately separate from _homing_phase/begin_homing_wait/poll_homing:
     # this never touches axis_homed, min_limit, or max_limit (a
     # dual_limit_switches joint's measured travel from initial homing must
     # survive every later retract unchanged), and it requires initial
-    # homing to have already completed once.
+    # homing to have already completed once. Unlike initial homing (one
+    # shared command.home(-1) covering every joint, see
+    # LinuxCNCMachineInterface.home_all_command()), this issues its own
+    # directly-numbered command.home(joint) for just this one joint, since
+    # only this joint is retracting at that point in a toolpath operation.
     def is_retract_in_progress(self) -> bool:
         return self._retract_phase is not None
 
@@ -406,8 +426,11 @@ class LinuxCNCAxialInterface:
         native homing never remeasures travel -- see generate_ini() and
         JointConfiguration.dual_limit_switches). Call poll_retract_to_zero()
         every subsequent heartbeat until it returns True (or raises) to
-        actually advance and complete it -- mirrors start_homing()/
-        poll_homing()'s non-blocking phase pattern.
+        actually advance and complete it -- mirrors poll_homing()'s
+        non-blocking phase pattern, though unlike begin_homing_wait() this
+        method issues its own directly-numbered command.home(joint) rather
+        than waiting on a command someone else already issued (see
+        is_retract_in_progress()'s comment above).
 
         joint.retract_to changes what "retract" means for this particular
         joint -- see its docstring (this project's Y axis is mechanically
@@ -421,11 +444,12 @@ class LinuxCNCAxialInterface:
         (native units/second), not a jog speed.
 
         Only valid for a switched joint (has_limit_switches) that has
-        already completed its initial start_homing()/poll_homing() --
-        raises RuntimeError otherwise (a fresh, never-homed joint has no
-        min_limit/max_limit established yet and should go through
-        start_homing() instead, which does everything this does plus the
-        initial travel measurement/establishment).
+        already completed its initial homing (MotionCoordinator.home_all()
+        -> begin_homing_wait()/poll_homing()) -- raises RuntimeError
+        otherwise (a fresh, never-homed joint has no min_limit/max_limit
+        established yet and must go through a full home_all() first, which
+        does everything this does plus the initial travel
+        measurement/establishment).
         """
         if not self.joint.has_limit_switches:
             raise RuntimeError(
@@ -436,7 +460,7 @@ class LinuxCNCAxialInterface:
         if not self.axis_homed:
             raise RuntimeError(
                 f"Joint {self.joint.joint} ({self.joint.axis}) must complete initial homing "
-                "(start_homing/poll_homing) before it can retract-to-zero."
+                "(home_all()) before it can retract-to-zero."
             )
 
         self._homing_timeout = timeout
@@ -454,8 +478,8 @@ class LinuxCNCAxialInterface:
             # value regardless of dual_limit_switches -- see
             # generate_ini()), so rerunning it here already is exactly a
             # retract-to-zero, with no separate code path needed. Requires
-            # the shared command channel already in MANUAL mode -- see
-            # ensure_manual_mode()/start_homing()'s docstring.
+            # the shared command channel in MANUAL mode -- see
+            # ensure_manual_mode()'s docstring.
             self.machine.ensure_manual_mode()
             self.command.home(self.joint.joint)
             self._retract_phase = "native_wait"

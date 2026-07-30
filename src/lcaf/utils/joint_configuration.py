@@ -39,8 +39,8 @@ class JointConfiguration:
     regardless of whether that zero comes from a physical limit switch or
     not:
     A switched joint (has_limit_switches=True; X/Y/Z here) has 0 wherever
-    LinuxCNCAxialInterface.start_homing()/poll_homing() finds the negative
-    limit switch at homing time, regardless of the physical machine's
+    LinuxCNCAxialInterface.begin_homing_wait()/poll_homing() finds the
+    negative limit switch at homing time, regardless of the physical machine's
     absolute position. The switch itself sits at 0 -- retracted_distance is
     NOT how far past the switch travel is allowed; it's the standoff
     position homing immediately backs the joint off to once the switch is
@@ -145,10 +145,11 @@ class JointConfiguration:
     has_limit_switches: bool = True
     """
     False for a joint with no physical limit switches (e.g. a continuously
-    rotating axis): start_homing() zeroes the joint at its current position
-    instead of seeking a switch, and retracted_distance/extended_distance
-    are trusted as configured rather than being measured. See
-    LinuxCNCAxialInterface.start_homing/poll_homing.
+    rotating axis): LinuxCNC's own native homing (HOME_SEARCH_VEL=0.0, see
+    generate_ini()) zeroes the joint at its current position instead of
+    seeking a switch, and retracted_distance/extended_distance are trusted
+    as configured rather than being measured. See
+    LinuxCNCAxialInterface.begin_homing_wait/poll_homing.
     """
 
     dual_limit_switches: bool = True
@@ -237,7 +238,7 @@ class JointConfiguration:
     # placeholder, matching LinuxCNC's own "no limit" semantics.
     #   - A switched linear joint (X/Y/Z): 0 is wherever LinuxCNC's own
     #     native homing finds the negative limit switch (see
-    #     LinuxCNCAxialInterface.start_homing/poll_homing) -- immediately
+    #     LinuxCNCAxialInterface.begin_homing_wait/poll_homing) -- immediately
     #     after which the joint backs off to retracted_distance, its
     #     standoff/parked position and this end's soft-limit floor, rather
     #     than sitting on the switch. extended_distance is the static
@@ -463,12 +464,17 @@ class MachineConfiguration:
     "_deg_s", "_deg_s2", "_ns" (nanoseconds).
 
     Homing: this project always uses LinuxCNC's own native homing sequence
-    (LinuxCNCAxialInterface.start_homing()/poll_homing() call
-    command.home(joint) and wait for status.joint[n]['homed']) --
-    generate_hal() wires each switched joint's negative-limit input to its
-    HOME_SEARCH_VEL-driven joint.N.home-sw-in pin, and generate_ini() fills
-    in real HOME_SEARCH_VEL/HOME_LATCH_VEL/HOME_SEQUENCE/HOME_IGNORE_LIMITS
-    values. This project previously also supported driving homing itself in
+    -- specifically its own "Home All"
+    (LinuxCNCMachineInterface.home_all_command() calls command.home(-1)
+    once, machine-wide, the exact same command the Axis GUI's own "Home
+    All" button sends), with each LinuxCNCAxialInterface then just waiting
+    (begin_homing_wait()/poll_homing()) for its own
+    status.joint[n]['homed'] rather than issuing a separate
+    command.home(joint) per joint itself -- generate_hal() wires each
+    switched joint's negative-limit input to its HOME_SEARCH_VEL-driven
+    joint.N.home-sw-in pin, and generate_ini() fills in real
+    HOME_SEARCH_VEL/HOME_LATCH_VEL/HOME_SEQUENCE/HOME_IGNORE_LIMITS values.
+    This project previously also supported driving homing itself in
     Python (jogging each joint to its limit switches directly, with
     command.override_limits() suppressing the resulting hard-limit fault) --
     removed because LinuxCNC's own realtime motion loop re-checks each

@@ -75,17 +75,46 @@ def make_retract_to_joint(joint: int = 1, axis: str = "Y", retract_to: float = 6
     )
 
 
+class HomeAllCommandTests(unittest.TestCase):
+    """
+    MotionCoordinator.home_all() homes every joint through a single native
+    "Home All" (LinuxCNCMachineInterface.home_all_command()) -- the exact
+    same command.home(-1) the Axis GUI's own "Home All" button sends --
+    rather than a separate command.home(joint) per joint. This project
+    previously did the latter; removed, since it was an unnecessary
+    reimplementation of exactly what "Home All" already does natively (see
+    docs/hardware_setup.md section 7).
+    """
+
+    def setUp(self):
+        self.fake_linuxcnc = sys.modules["linuxcnc"]
+        self.machine = LinuxCNCMachineInterface()
+        self.command = self.fake_linuxcnc._last_command
+
+    def test_home_all_command_issues_a_single_home_minus_one(self):
+        self.machine.home_all_command()
+
+        home_calls = [c for c in self.command.calls if c[0] == "home"]
+        self.assertEqual(len(home_calls), 1)
+        self.assertEqual(home_calls[0][1], -1)
+
+        mode_calls = [c for c in self.command.calls if c[0] == "mode"]
+        self.assertEqual(len(mode_calls), 1)
+
+
 class NativeHomingTests(unittest.TestCase):
     """
     This project always homes via LinuxCNC's own native homing sequence --
-    LinuxCNCAxialInterface.start_homing()/poll_homing() call
-    command.home(joint) and wait (without blocking) for
-    status.joint[n]['homed']. There is no software-jog-to-switch fallback
-    (removed: LinuxCNC's own realtime motion loop re-checks each joint's
-    hard-limit HAL pin every servo cycle independently of any Python
-    process, and a Python client reactively calling
-    command.override_limits() once per its own control-loop heartbeat
-    cannot reliably win that race -- see
+    a single machine-wide "Home All" (LinuxCNCMachineInterface.
+    home_all_command(), see HomeAllCommandTests above) that every joint
+    then independently waits out via
+    LinuxCNCAxialInterface.begin_homing_wait()/poll_homing() (without
+    issuing any command of its own) for status.joint[n]['homed']. There is
+    no software-jog-to-switch fallback (removed: LinuxCNC's own realtime
+    motion loop re-checks each joint's hard-limit HAL pin every servo cycle
+    independently of any Python process, and a Python client reactively
+    calling command.override_limits() once per its own control-loop
+    heartbeat cannot reliably win that race -- see
     JointConfiguration/MachineConfiguration's homing note and
     docs/potential_issues.md). generate_ini()'s HOME_IGNORE_LIMITS=YES is
     what keeps LinuxCNC's own homing state machine from faulting on the
@@ -117,16 +146,15 @@ class NativeHomingTests(unittest.TestCase):
     def test_negative_and_positive_limits_are_different_hal_pins(self):
         self.assertNotEqual(self.neg_pin(), self.pos_pin())
 
-    def test_start_homing_calls_native_home(self):
-        self.axial.start_homing(timeout=5.0)
+    def test_begin_homing_wait_issues_no_command_of_its_own(self):
+        self.axial.begin_homing_wait(timeout=5.0)
 
         self.assertEqual(self.axial._homing_phase, "native_wait")
         home_calls = [c for c in self.command.calls if c[0] == "home"]
-        self.assertEqual(len(home_calls), 1)
-        self.assertEqual(home_calls[0][1], self.joint.joint)
+        self.assertEqual(len(home_calls), 0)
 
     def test_poll_homing_waits_for_homed_status(self):
-        self.axial.start_homing(timeout=5.0)
+        self.axial.begin_homing_wait(timeout=5.0)
 
         self.assertFalse(self.axial.poll_homing())
         self.assertFalse(self.axial.has_axis_been_homed())
@@ -140,7 +168,7 @@ class NativeHomingTests(unittest.TestCase):
         # regardless of dual_limit_switches -- MAX_LIMIT is always the
         # static configured extended_distance (see generate_ini() /
         # JointConfiguration.dual_limit_switches).
-        self.axial.start_homing(timeout=5.0)
+        self.axial.begin_homing_wait(timeout=5.0)
         self.stat.joint[self.joint.joint]["homed"] = True
         self.axial.poll_homing()
 
@@ -148,7 +176,7 @@ class NativeHomingTests(unittest.TestCase):
         self.assertEqual(self.axial.max_limit["native"], self.joint.extended_distance)
 
     def test_fault_while_homing_raises(self):
-        self.axial.start_homing(timeout=5.0)
+        self.axial.begin_homing_wait(timeout=5.0)
         self.stat.joint[self.joint.joint]["fault"] = True
 
         with self.assertRaises(RuntimeError):
@@ -157,7 +185,7 @@ class NativeHomingTests(unittest.TestCase):
     def test_timeout_raises_if_never_reports_homed(self):
         import time as time_module
 
-        self.axial.start_homing(timeout=0.0)
+        self.axial.begin_homing_wait(timeout=0.0)
         self.axial._homing_start_time = time_module.monotonic() - 1.0
 
         with self.assertRaises(TimeoutError):
@@ -195,7 +223,7 @@ class SingleLimitSwitchHomingTests(unittest.TestCase):
         self.axial = LinuxCNCAxialInterface(self.joint, self.machine)
 
     def test_homing_completes_and_trusts_configured_extended_distance(self):
-        self.axial.start_homing(timeout=5.0)
+        self.axial.begin_homing_wait(timeout=5.0)
         self.stat.joint[self.joint.joint]["homed"] = True
 
         self.assertTrue(self.axial.poll_homing())
@@ -227,7 +255,12 @@ class RetractToZeroTests(unittest.TestCase):
         self.axial = LinuxCNCAxialInterface(self.joint, self.machine)
 
     def complete_initial_homing(self):
-        self.axial.start_homing(timeout=5.0)
+        # Initial homing no longer issues its own command.home(joint) --
+        # it's covered by the machine-wide "Home All"
+        # (LinuxCNCMachineInterface.home_all_command(), see
+        # HomeAllCommandTests) -- this just establishes the axis_homed/
+        # min_limit/max_limit state a retract requires to already be true.
+        self.axial.begin_homing_wait(timeout=5.0)
         self.stat.joint[self.joint.joint]["homed"] = True
         self.axial.poll_homing()
         self.assertTrue(self.axial.has_axis_been_homed())
@@ -252,7 +285,12 @@ class RetractToZeroTests(unittest.TestCase):
 
         self.assertEqual(self.axial._retract_phase, "native_wait")
         home_calls = [c for c in self.command.calls if c[0] == "home"]
-        self.assertEqual(len(home_calls), 2)  # initial homing + this retract
+        # Initial homing (complete_initial_homing() above) issued no
+        # command.home() of its own -- it's covered by the machine-wide
+        # "Home All" instead (see HomeAllCommandTests) -- so this retract's
+        # own directly-numbered command.home(joint) is the only one here.
+        self.assertEqual(len(home_calls), 1)
+        self.assertEqual(home_calls[0][1], self.joint.joint)
 
         self.stat.joint[self.joint.joint]["homed"] = True
         done = self.axial.poll_retract_to_zero()

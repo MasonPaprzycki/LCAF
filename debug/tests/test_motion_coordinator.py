@@ -118,13 +118,14 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
 
 class ConcurrentHomingTests(unittest.TestCase):
     """
-    home_all() must home X, Y, and Z (and A) all at the same time, not one
-    at a time -- LinuxCNC's own native homing per joint is independent and
-    safe to run concurrently (HOME_IGNORE_LIMITS is evaluated inside
-    LinuxCNC's own compiled homing state machine, per joint, not a shared
-    reactive mechanism -- see MotionCoordinator.home_all()'s docstring).
-    Each axis then backs off to its own configured retracted_distance as
-    part of LinuxCNC's own native homing sequence (generate_ini() sets
+    home_all() homes X, Y, Z, and A all through a single native "Home All"
+    (command.home(-1), issued once machine-wide by
+    LinuxCNCMachineInterface.home_all_command() -- the exact same command
+    the Axis GUI's own "Home All" button sends -- see
+    MotionCoordinator.home_all()'s docstring), not a separate
+    command.home(joint) per joint. Each axis then independently backs off
+    to its own configured retracted_distance as part of LinuxCNC's own
+    native homing sequence (generate_ini() sets
     [JOINT_n]HOME=retracted_distance, so LinuxCNC's own final move-to-HOME
     step does this natively -- status.joint[n]['homed'] only becomes true
     once that move completes), fully independently of the other axes -- not
@@ -175,23 +176,28 @@ class ConcurrentHomingTests(unittest.TestCase):
 
         self.fail(f"not every axis finished homing within {self._MAX_TICKS} ticks")
 
-    def test_home_all_issues_command_home_for_every_axis_in_one_poll(self):
+    def test_home_all_issues_a_single_native_home_all(self):
         self.motion.home_all()
 
         for axis_name in ("x", "y", "z", "a"):
             self.assertEqual(self.motion.axes[axis_name].status.state, AxisState.HOMING)
 
-        # A single poll() must start every axis's own command.home() at
-        # once -- none deferred until another axis finishes.
-        self.motion.poll()
-
+        # home_all() itself issues the one machine-wide command.home(-1) --
+        # not deferred to a later poll(), and not one call per joint.
         home_calls = [c for c in self.command.calls if c[0] == "home"]
-        homed_joints = {c[1] for c in home_calls}
-        expected_joints = {self.motion.axes[name].joint for name in ("x", "y", "z", "a")}
-        self.assertEqual(homed_joints, expected_joints)
+        self.assertEqual(len(home_calls), 1)
+        self.assertEqual(home_calls[0][1], -1)
+
+        # A single poll() must start every axis's own wait on that one
+        # shared command -- none deferred until another axis finishes, and
+        # none issuing any further command of their own.
+        self.motion.poll()
 
         for axis_name in ("x", "y", "z", "a"):
             self.assertEqual(self.motion.axes[axis_name].axial_interface._homing_phase, "native_wait")
+
+        home_calls = [c for c in self.command.calls if c[0] == "home"]
+        self.assertEqual(len(home_calls), 1)
 
     def test_all_axes_home_and_back_off_concurrently(self):
         self.motion.home_all()

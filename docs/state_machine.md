@@ -898,9 +898,12 @@ HOMING → FAULT
 
 The axis is re-seeking its own negative limit switch to re-zero before a
 retract move, exactly like HOMING's seek phase mechanically -- driven by
-`LinuxCNCAxialInterface.start_retract_to_zero()`/`poll_retract_to_zero()`
-instead of `start_homing()`/`poll_homing()`, and requires the axis to have
-already completed HOMING at least once this session. Unlike HOMING it
+`LinuxCNCAxialInterface.start_retract_to_zero()`/`poll_retract_to_zero()`,
+which (unlike HOMING's `begin_homing_wait()`/`poll_homing()`) issues its
+own directly-numbered `command.home(joint)` for just this one axis, since
+only this joint is retracting at that point, not the whole machine -- and
+requires the axis to have already completed HOMING at least once this
+session. Unlike HOMING it
 never re-measures this axis's travel range -- it only re-establishes where
 zero is. Entered once per retract by `MotionCoordinator` (see the
 "Retract-to-zero" note under `docs/hardware_setup.md` section 7), not just

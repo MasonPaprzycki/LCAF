@@ -57,7 +57,7 @@ class Axis:
         # HOMING and RETRACTING are excluded: LinuxCNC's own native homing
         # and retract-to-zero both deliberately drive this joint onto its
         # own negative limit switch to find it (see
-        # LinuxCNCAxialInterface.start_homing/start_retract_to_zero).
+        # LinuxCNCAxialInterface.begin_homing_wait/start_retract_to_zero).
         # HOME_IGNORE_LIMITS (generate_ini()) keeps LinuxCNC's homing state
         # machine itself from faulting on that expected trip, but the raw
         # status.joint[n]['min_hard_limit']/['max_hard_limit'] fields
@@ -98,8 +98,10 @@ class Axis:
                 return
 
             if not self.axial_interface.has_homing_ever_been_intialized():
-                self.logger.info(f"{self.axis}: Issuing native home command to LinuxCNC.")
-                self.axial_interface.start_homing()
+                self.logger.info(
+                    f"{self.axis}: Waiting for LinuxCNC's native Home All to home this joint."
+                )
+                self.axial_interface.begin_homing_wait()
                 return
 
             try:

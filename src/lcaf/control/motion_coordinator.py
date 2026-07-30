@@ -371,43 +371,40 @@ class MotionCoordinator:
 
     def home_all(self):
         """
-        Home all machine axes at once -- LinuxCNC's own native homing
-        sequence for each joint is entirely independent and safe to run
-        concurrently (HOME_IGNORE_LIMITS is evaluated per joint inside
-        LinuxCNC's own compiled homing state machine, not a shared
-        machine-wide reactive mechanism -- see JointConfiguration/
-        MachineConfiguration's homing note), so there is no ordering or
-        shared resource to serialize against here.
+        Home every axis through LinuxCNC's own native "Home All" -- a
+        single command.home(-1) issued once, machine-wide
+        (LinuxCNCMachineInterface.home_all_command()), the exact same
+        command the Axis GUI's own "Home All" button sends. LinuxCNC's own
+        task-level homing sequencer then drives every joint's search and
+        backoff itself, honoring each joint's own [JOINT_n]HOME_SEQUENCE
+        (generate_ini()) exactly the way that button does.
 
-        Each axis backs off to its own configured retracted_distance
-        immediately once its own homing completes -- entirely inside
-        LinuxCNCAxialInterface.poll_homing() (see
-        JointConfiguration.retracted_distance), transparently to this
-        class: Axis.is_homed() (and therefore all_homed() below) only
-        becomes true once that backoff has finished too, independently per
-        axis, with no cross-axis sequencing needed.
+        This project previously re-issued a separate command.home(joint)
+        call per joint instead, from each Axis's own lazily-triggered
+        start_homing() -- removed: it was an unnecessary reimplementation
+        of exactly what "Home All" already does natively, and didn't behave
+        identically to the GUI button that operators use to confirm homing
+        works at all (see docs/hardware_setup.md section 7).
 
-        Switches the shared command channel to MANUAL mode once, up front
-        (LinuxCNCMachineInterface.ensure_manual_mode()), rather than letting
-        each axis's own lazily-triggered start_homing() re-issue that same
-        machine-wide mode switch redundantly -- since every axis starts
-        homing within this same heartbeat (see below), that used to mean up
-        to four back-to-back mode-switch round trips over the one shared
-        NML channel with no gap between them.
+        Each axis then just watches its own status.joint[n]['homed']
+        (Axis.poll() -> LinuxCNCAxialInterface.begin_homing_wait()/
+        poll_homing()) until LinuxCNC's own Home All finishes homing it --
+        including backing it off to its own configured retracted_distance,
+        entirely inside that same native sequence (see
+        JointConfiguration.retracted_distance) -- independently and
+        asynchronously per axis, with nothing further for this project's
+        own code to command. Axis.is_homed() (and therefore all_homed()
+        below) only becomes true once that backoff has finished too.
         """
 
-        self.logger.info("HOMING START: all axes")
+        self.logger.info("HOMING START: Home All (LinuxCNC native)")
 
-        self.interface.ensure_manual_mode()
+        self.interface.home_all_command()
 
         for name, motor in self.axes.items():
-            try:
-                self.logger.info(f"HOMING COMMAND: axis={name}")
-                motor.home()
+            motor.home()
 
-            except Exception as e:
-                self.logger.exception(f"HOMING FAILED: axis={name}, error={e}")
-                raise
+        self.logger.info("HOMING COMMAND ISSUED: Home All")
 
         self.logger.info("HOMING COMMANDS ISSUED: all axes")
 
