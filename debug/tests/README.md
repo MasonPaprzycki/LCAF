@@ -101,7 +101,11 @@ here on its own.
   spelling out every registered axis's own word explicitly (at its own
   real current position), not just the one axis being commanded -- see
   `docs/hardware_setup.md` section 10 for the real-hardware failure this
-  fixes.
+  fixes. `RestatedSiblingSafetyMarginTests` covers the follow-on fix: a
+  sibling sitting exactly at its own `retracted_distance`/`extended_distance`
+  (its `MIN_LIMIT`/`MAX_LIMIT`) gets nudged a small safety margin inside
+  that range before being restated in the G-code line, rather than risking
+  a floating-point round-trip landing a hair outside it.
 
 - **`conftest.py`** -- installs the fake `linuxcnc`/`hal` modules (below)
   into `sys.modules` before any test module is collected, so

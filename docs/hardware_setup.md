@@ -439,6 +439,23 @@ position against the target -- so this failure mode stalls silently at the
 relevant `VERIFY_*` state rather than proceeding with the tool in the
 wrong place, but never reports an error either.
 
+**Restated sibling positions get a small safety margin off any soft
+limit.** A sibling axis's own real position is most often *exactly* its
+`retracted_distance` right after a home/retract -- which is also exactly
+its own `MIN_LIMIT`. Restating that value verbatim (as the fix above
+does) still round-trips it through this project's own native-inches-to-mm
+conversion and then LinuxCNC's own mm-to-native conversion, and
+real-hardware testing found that round-trip alone can land a hair below
+`MIN_LIMIT` from ordinary floating-point noise -- with no margin to absorb
+it, since the value already sits exactly on the limit. LinuxCNC then
+rejects the whole line the same way as the stale-position case above, even
+though nothing has actually gone out of range physically.
+`LinuxCNCAxialInterface._restated_position_machine_units()` nudges a
+sibling's restated value at least `_RESTATED_AXIS_SAFETY_MARGIN_MM`
+(`0.01` mm) inside `[MIN_LIMIT, MAX_LIMIT]` before it's ever written into
+the G-code line, specifically for this case -- values already comfortably
+inside the range pass through unchanged.
+
 **Every axis is zero-based, matching where it physically starts, with range
 `[retracted_distance, extended_distance]`:**
 

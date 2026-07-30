@@ -630,11 +630,28 @@ class LinuxCNCAxialInterface:
             sibling = axis.axial_interface
             if sibling is self or sibling.joint.axis == self.joint.axis:
                 continue
-            words.append(f"{sibling.joint.axis}{sibling.get_position_machine_units():.4f}")
+            words.append(f"{sibling.joint.axis}{sibling._restated_position_machine_units():.4f}")
 
         mdi = f"G21 G1 {' '.join(words)} F{feed}"
 
         self.execute_mdi(mdi)
+
+    # A sibling axis's own real position is most often *exactly* its
+    # retracted_distance right after a home/retract, which is also exactly
+    # its own MIN_LIMIT -- restating that value in a G-code word round-trips
+    # it through this project's own native-inches-to-mm-string conversion
+    # and then LinuxCNC's own mm-to-native conversion, and real-hardware
+    # testing found that round-trip alone can land a hair below MIN_LIMIT
+    # from ordinary floating-point noise, with no real margin to absorb it
+    # since the value is already sitting exactly on the limit. See move().
+    _RESTATED_AXIS_SAFETY_MARGIN_MM = 0.01
+
+    def _restated_position_machine_units(self) -> float:
+        value = self.get_position_machine_units()
+        minimum = self.to_machine_units(self.min_limit["native"])
+        maximum = self.to_machine_units(self.max_limit["native"])
+        margin = self._RESTATED_AXIS_SAFETY_MARGIN_MM
+        return min(max(value, minimum + margin), maximum - margin)
 
     def dwell(self, seconds):
         self.execute_mdi(f"G4 P{seconds}")

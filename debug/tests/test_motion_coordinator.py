@@ -152,10 +152,12 @@ class MultiAxisMdiWordTests(unittest.TestCase):
             axis.axial_interface._set_homed_limits()
 
         # Distinct native-unit positions per joint so each one's expected
-        # machine-units word is unambiguous below.
+        # machine-units word is unambiguous below. None of these sit exactly
+        # on a soft limit -- see RestatedSiblingSafetyMarginTests for that
+        # boundary case specifically.
         self.stat.joint_actual_position[self.motion.axes["x"].joint] = 0.5  # in -> 12.7 mm
         self.stat.joint_actual_position[self.motion.axes["y"].joint] = 1.5  # in -> 38.1 mm
-        self.stat.joint_actual_position[self.motion.axes["z"].joint] = 0.25  # in -> 6.35 mm
+        self.stat.joint_actual_position[self.motion.axes["z"].joint] = 0.3  # in -> 7.62 mm
         self.stat.joint_actual_position[self.motion.axes["a"].joint] = 45.0  # deg, unconverted
 
     def tearDown(self):
@@ -172,7 +174,7 @@ class MultiAxisMdiWordTests(unittest.TestCase):
         mdi = self.last_mdi_line()
         self.assertIn("X12.7000", mdi)
         self.assertIn("Y50.0000", mdi)
-        self.assertIn("Z6.3500", mdi)
+        self.assertIn("Z7.6200", mdi)
         self.assertIn("A45.0000", mdi)
 
     def test_moving_a_different_axis_still_restates_every_sibling(self):
@@ -183,6 +185,69 @@ class MultiAxisMdiWordTests(unittest.TestCase):
         self.assertIn("Y38.1000", mdi)
         self.assertIn("Z50.0000", mdi)
         self.assertIn("A45.0000", mdi)
+
+
+class RestatedSiblingSafetyMarginTests(unittest.TestCase):
+    """
+    A sibling axis's own real position is most often *exactly* its
+    retracted_distance right after a home/retract -- which is also exactly
+    its own MIN_LIMIT. Real-hardware testing found that restating that
+    value verbatim in a G-code word (native inches -> mm string ->
+    LinuxCNC's own mm-to-native conversion) can round-trip a hair below
+    MIN_LIMIT from ordinary floating-point noise, with no margin to absorb
+    it since the value already sits exactly on the limit -- LinuxCNC then
+    rejected the entire multi-axis line, not just that one word. See
+    LinuxCNCAxialInterface._restated_position_machine_units().
+    """
+
+    def setUp(self):
+        self.fake_linuxcnc = sys.modules["linuxcnc"]
+
+        self.machine_config = load_machine_configuration(REPO_ROOT / "configs" / "machine.json")
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.motion = MotionCoordinator(
+            machine_config=self.machine_config,
+            generated_config_dir=self._tmpdir.name,
+        )
+        self.stat = self.fake_linuxcnc._last_stat
+        self.command = self.fake_linuxcnc._last_command
+
+        for axis in self.motion.axes.values():
+            axis.axial_interface.axis_homed = True
+            axis.axial_interface._set_homed_limits()
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def last_mdi_line(self) -> str:
+        mdi_calls = [c for c in self.command.calls if c[0] == "mdi"]
+        self.assertTrue(mdi_calls, "expected at least one mdi() call")
+        return mdi_calls[-1][1]
+
+    def test_sibling_exactly_at_retracted_distance_is_nudged_off_the_boundary(self):
+        z_axis = self.motion.axes["z"].axial_interface
+        # Exactly retracted_distance (0.25 in for Z, see axis.json) -- the
+        # parked position every switched joint sits at right after a
+        # home/retract, and also exactly Z's own MIN_LIMIT.
+        self.stat.joint_actual_position[z_axis.joint.joint] = z_axis.joint.retracted_distance
+
+        self.motion.move_axis("y", 50.0)
+
+        mdi = self.last_mdi_line()
+        self.assertNotIn("Z6.3500", mdi)
+        self.assertIn("Z6.3600", mdi)
+
+    def test_sibling_exactly_at_extended_distance_is_nudged_off_the_boundary(self):
+        y_axis = self.motion.axes["y"].axial_interface
+        # Exactly extended_distance (2.5 in for Y, see axis.json) -- Y's own
+        # MAX_LIMIT.
+        self.stat.joint_actual_position[y_axis.joint.joint] = y_axis.joint.extended_distance
+
+        self.motion.move_axis("z", 50.0)
+
+        mdi = self.last_mdi_line()
+        self.assertNotIn("Y63.5000", mdi)
+        self.assertIn("Y63.4900", mdi)
 
 
 class ConcurrentHomingTests(unittest.TestCase):
