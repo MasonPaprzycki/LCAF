@@ -30,6 +30,12 @@ class AxisStatus:
 class Axis:
 
     def __init__(self, joint_config: JointConfiguration, machine: LinuxCNCMachineInterface):
+
+        if joint_config.retract_to is None:
+               self.retracted_position = joint_config.retracted_distance
+        else:
+            self.retracted_position = joint_config.retract_to
+
         self.axis = joint_config.axis.lower()
         self.joint = joint_config.joint
         self.axial_interface = LinuxCNCAxialInterface(joint_config, machine)
@@ -54,21 +60,8 @@ class Axis:
                 "(following error tripped -- see docs/potential_issues.md)."
             )
 
-        # HOMING and RETRACTING are excluded: LinuxCNC's own native homing
-        # and retract-to-zero both deliberately drive this joint onto its
-        # own negative limit switch to find it (see
-        # LinuxCNCAxialInterface.begin_homing_wait/start_retract_to_zero).
-        # HOME_IGNORE_LIMITS (generate_ini()) keeps LinuxCNC's homing state
-        # machine itself from faulting on that expected trip, but the raw
-        # status.joint[n]['min_hard_limit']/['max_hard_limit'] fields
-        # is_on_hard_limit() reads still reflect the physical pin regardless
-        # -- so is_on_hard_limit() reading True during either phase here is
-        # still expected, not a fault. Anywhere else, LinuxCNC reporting this
-        # joint on a hard limit means every joint's enable output has just
-        # been disabled machine-wide (see docs/hardware_setup.md) -- a different condition
-        # from is_faulted() above (that only reflects following error, never
-        # a hard-limit trip), so without this check it would go completely
-        # unnoticed here.
+        # HOMING is excluded: LinuxCNC's own native homing is used for homing 
+        
         if (
             self.status.state not in (AxisState.FAULT, AxisState.HOMING, AxisState.RETRACTING)
             and self.axial_interface.is_on_hard_limit()
@@ -112,20 +105,22 @@ class Axis:
                 self.status.state = AxisState.FAULT
                 self.logger.error(f"{self.axis}: Homing failed: {e}")
 
-        # Retract-to-zero detection (see retract_to_zero()/is_retracted())
+        # Retract-to-zero detection (see retract()/is_retracted())
         elif self.status.state == AxisState.RETRACTING:
             try:
                 if not self._retract_command_issued:
-                    self.axial_interface.start_retract_to_zero(
-                        speed=self.axial_interface.joint.max_velocity
-                    )
+                    if self.retracted_position is None:
+                        raise RuntimeError(
+                            f"{self.axis}: No retract position configured; cannot move to retract position."
+                        )
+                    self.axial_interface.move(position=self.retracted_position, feed=1000)
                     self._retract_command_issued = True
                     return
 
-                if self.axial_interface.poll_retract_to_zero():
-                    self._retracted = True
-                    self.status.state = AxisState.READY
-                    self.logger.info(f"{self.axis}: Retract-to-zero complete.")
+                elif self.axial_interface.is_axis_in_position():
+                                self.status.state = AxisState.READY
+                                self.logger.info(f"{self.axis}: retraction complete.")
+                                return
 
             except (RuntimeError, TimeoutError) as e:
                 self.status.fault = True
@@ -150,20 +145,11 @@ class Axis:
     def is_homed(self):
         return self.axial_interface.has_axis_been_homed()
 
-    def retract_to_zero(self):
+    def retract(self):
         """
-        Begin retracting this axis -- for almost every axis that means
-        re-zeroing against its negative limit switch before the move,
-        rather than trusting the commanded "0.0" position (see
-        LinuxCNCAxialInterface.start_retract_to_zero() for why). This
-        project's Y axis is the one exception (JointConfiguration.
-        retract_to): mechanically its retracted position is partway into
-        its positive-direction travel, so it instead moves to its
-        configured retract_to position -- still routed through this same
-        method/state, since LinuxCNCAxialInterface handles the distinction
-        internally. Mirrors
-        home(): MotionCoordinator calls this once per retract, then polls
-        is_retracted() every heartbeat while poll() (above) advances it.
+         Command a this axis to retract as configured in the axis.json 
+                if retract_to is null it retracts to its retracted_distance 
+                if retract_to is not null it retracts to that position
         """
         self.status.state = AxisState.RETRACTING
         self._retract_command_issued = False
@@ -175,10 +161,11 @@ class Axis:
 
     def is_retracted(self):
         """
-        True once the most recent retract_to_zero() call has completed.
-        Reset to False by the next retract_to_zero() call.
+        True once the most recent retract() call has completed.
+        Reset to False by the next retract() call.
         """
         return self._retracted
+
 
     def move(self, position, feed=1000):
         """

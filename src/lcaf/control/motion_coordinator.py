@@ -319,18 +319,10 @@ class MotionCoordinator:
 
     def retract_axis(self, axis: str):
         """
-        Command a single axis to retract (Axis.retract_to_zero()) -- for
-        almost every axis that means re-seeking its negative limit switch
-        rather than trusting a commanded "0.0" position (see
-        LinuxCNCAxialInterface.start_retract_to_zero() for why: these are
-        open-loop stepper joints with no position feedback, so trusting an
-        accumulated commanded position instead of re-referencing to the
-        physical switch risks silent drift -- docs/potential_issues.md).
-        This project's Y axis is the one exception
-        (JointConfiguration.retract_to): it retracts to its configured
-        retract_to position instead, since its retracted position is
-        mechanically partway into its positive-direction travel -- see
-        LinuxCNCAxialInterface.start_retract_to_zero().
+        Command a single axis to retract (Axis.retract()) 
+        As configured in its axis.json 
+        if retract_to is null it retracts to its retracted_distance 
+        if retract_to is not null it retracts to that position
         """
 
         if axis not in self.axes:
@@ -344,7 +336,7 @@ class MotionCoordinator:
 
         try:
 
-            self.axes[axis].retract_to_zero()
+            self.axes[axis].retract()
 
             self.logger.info(f"RETRACT ACCEPTED: axis={axis}")
 

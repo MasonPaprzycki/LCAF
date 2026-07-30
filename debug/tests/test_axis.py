@@ -111,7 +111,7 @@ class RetractToZeroTests(unittest.TestCase):
         self.axis.axial_interface.axis_homed = True
 
     def test_retract_to_zero_completes_and_reports_retracted(self):
-        self.axis.retract_to_zero()
+        self.axis.retract()
         self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
         self.assertFalse(self.axis.is_retracted())
 
@@ -127,7 +127,7 @@ class RetractToZeroTests(unittest.TestCase):
         self.assertTrue(self.axis.is_retracted())
 
     def test_hard_limit_true_during_retracting_does_not_fault(self):
-        self.axis.retract_to_zero()
+        self.axis.retract()
         self.axis.poll()
         self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
 
@@ -138,14 +138,14 @@ class RetractToZeroTests(unittest.TestCase):
         self.assertFalse(self.axis.has_fault())
 
     def test_is_retracted_resets_on_next_retract_call(self):
-        self.axis.retract_to_zero()
+        self.axis.retract()
         self.axis.poll()
         self.stat.joint[self.joint.joint]["homed"] = True
         self.axis.poll()
         self.assertTrue(self.axis.is_retracted())
 
         self.stat.joint[self.joint.joint]["homed"] = False
-        self.axis.retract_to_zero()
+        self.axis.retract()
 
         self.assertFalse(self.axis.is_retracted())
         self.assertEqual(self.axis.status.state, AxisState.RETRACTING)
