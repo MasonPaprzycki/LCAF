@@ -97,7 +97,11 @@ here on its own.
   and none issuing a further command of their own), each axis homes and
   backs off to its own `retracted_distance` fully independently of the
   others, and `all_homed()` only reports True once every axis has
-  finished.
+  finished. `MultiAxisMdiWordTests` covers `LinuxCNCAxialInterface.move()`
+  spelling out every registered axis's own word explicitly (at its own
+  real current position), not just the one axis being commanded -- see
+  `docs/hardware_setup.md` section 10 for the real-hardware failure this
+  fixes.
 
 - **`conftest.py`** -- installs the fake `linuxcnc`/`hal` modules (below)
   into `sys.modules` before any test module is collected, so

@@ -116,6 +116,75 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
         self.assertEqual(self.motion.axes["z"].status.state, AxisState.FAULT)
 
 
+class MultiAxisMdiWordTests(unittest.TestCase):
+    """
+    LinuxCNCAxialInterface.move() must spell out every registered axis's
+    own word explicitly (at its own real current position), not just the
+    one axis actually being commanded. Real-hardware testing found that a
+    bare single-axis MDI line (e.g. "G1 Y1.5000") gets its *other* axis
+    words filled in by whatever position the RS274NGC interpreter itself
+    last tracked -- not reliably synced with the actual machine position
+    established by native homing/jogging -- and LinuxCNC rejected the
+    entire line ("would exceed joint N's negative limit" / "invalid params
+    in linear command") for axes that were never being commanded to move
+    at all. See LinuxCNCAxialInterface.move()'s comment.
+    """
+
+    def setUp(self):
+        self.fake_linuxcnc = sys.modules["linuxcnc"]
+
+        self.machine_config = load_machine_configuration(REPO_ROOT / "configs" / "machine.json")
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.motion = MotionCoordinator(
+            machine_config=self.machine_config,
+            generated_config_dir=self._tmpdir.name,
+        )
+        self.stat = self.fake_linuxcnc._last_stat
+        self.command = self.fake_linuxcnc._last_command
+
+        for axis in self.motion.axes.values():
+            axis.axial_interface.axis_homed = True
+            # Mirrors what poll_homing() sets on real success -- Axis.move()
+            # gates on is_position_in_range(), which needs these populated
+            # (they default to 0.0/0.0 otherwise, since the axis_homed
+            # shortcut above bypasses the real homing flow that would
+            # normally set them).
+            axis.axial_interface._set_homed_limits()
+
+        # Distinct native-unit positions per joint so each one's expected
+        # machine-units word is unambiguous below.
+        self.stat.joint_actual_position[self.motion.axes["x"].joint] = 0.5  # in -> 12.7 mm
+        self.stat.joint_actual_position[self.motion.axes["y"].joint] = 1.5  # in -> 38.1 mm
+        self.stat.joint_actual_position[self.motion.axes["z"].joint] = 0.25  # in -> 6.35 mm
+        self.stat.joint_actual_position[self.motion.axes["a"].joint] = 45.0  # deg, unconverted
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def last_mdi_line(self) -> str:
+        mdi_calls = [c for c in self.command.calls if c[0] == "mdi"]
+        self.assertTrue(mdi_calls, "expected at least one mdi() call")
+        return mdi_calls[-1][1]
+
+    def test_move_axis_includes_every_other_axis_at_its_real_position(self):
+        self.motion.move_axis("y", 50.0)  # within Y's [6.35, 63.5] mm range
+
+        mdi = self.last_mdi_line()
+        self.assertIn("X12.7000", mdi)
+        self.assertIn("Y50.0000", mdi)
+        self.assertIn("Z6.3500", mdi)
+        self.assertIn("A45.0000", mdi)
+
+    def test_moving_a_different_axis_still_restates_every_sibling(self):
+        self.motion.move_axis("z", 50.0)
+
+        mdi = self.last_mdi_line()
+        self.assertIn("X12.7000", mdi)
+        self.assertIn("Y38.1000", mdi)
+        self.assertIn("Z50.0000", mdi)
+        self.assertIn("A45.0000", mdi)
+
+
 class ConcurrentHomingTests(unittest.TestCase):
     """
     home_all() homes X, Y, Z, and A all through a single native "Home All"

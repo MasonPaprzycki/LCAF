@@ -608,7 +608,31 @@ class LinuxCNCAxialInterface:
         # RS274NGC parameter file from the last run, which is not guaranteed
         # to be mm. A/B/C words (rotation) are always degrees and unaffected
         # by G20/G21, so this is safe for the angular joint too.
-        mdi = f"G21 G1 {self.joint.axis}{position:.4f} F{feed}"
+        #
+        # Every other registered axis's word is always spelled out
+        # explicitly too, at its own real current position -- not omitted.
+        # Real-hardware testing found that a bare single-axis line (e.g.
+        # "G1 Y1.5000") gets its *other* axis words filled in by whatever
+        # position the RS274NGC interpreter itself last tracked, which is
+        # not reliably synced with the actual machine position established
+        # by native homing/jogging (a completely separate mechanism from
+        # G-code motion) -- the interpreter then rejected the entire line
+        # ("would exceed joint N's negative limit" / "invalid params in
+        # linear command") for axes that were never actually being
+        # commanded to move at all. Explicitly restating every other axis's
+        # own real position removes any dependency on the interpreter's own
+        # tracked state. self.machine._axes (LinuxCNCMachineInterface.
+        # register_axes()) is empty in isolated unit tests -- this falls
+        # back to just this joint's own word in that case, unchanged from
+        # before.
+        words = [f"{self.joint.axis}{position:.4f}"]
+        for axis in self.machine._axes:
+            sibling = axis.axial_interface
+            if sibling is self or sibling.joint.axis == self.joint.axis:
+                continue
+            words.append(f"{sibling.joint.axis}{sibling.get_position_machine_units():.4f}")
+
+        mdi = f"G21 G1 {' '.join(words)} F{feed}"
 
         self.execute_mdi(mdi)
 

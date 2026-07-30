@@ -414,6 +414,31 @@ sends an explicit `G21` so LinuxCNC interprets those millimetre values
 correctly regardless of the inch-native machine config above. You never
 need to convert a toolpath file to inches.
 
+**Every MDI move spells out all four axis words, not just the one being
+commanded.** `move()` restates every other registered axis's own real
+current position (read straight from `status.joint_actual_position`,
+converted to machine units) alongside the one axis actually moving, rather
+than leaving the other axis words out of the G-code line and letting
+LinuxCNC's RS274NGC interpreter fill them in from its own internally
+tracked position. Real-hardware testing found that interpreter-tracked
+position is not reliably synced with the actual machine position
+established by native homing/jogging (a separate mechanism from G-code
+motion entirely) -- a bare single-axis line like `G1 Y1.5000` got its
+*other* axis words filled in with a stale position below their own
+negative limits, and LinuxCNC rejected the whole line (`"would exceed
+joint N's negative limit"` / `"invalid params in linear command"`) even
+though the commanded axis's own word was perfectly valid. Because the
+whole line was rejected, the commanded axis never actually moved either --
+but `Axis.poll()`'s own `is_axis_in_position()` check only reads
+`status.joint[n]['inpos']` (true whenever a joint isn't currently moving,
+which is trivially also true for a move that never started), so the
+control process logged a misleading `"Motion complete"` regardless.
+`MotionCoordinator`'s own `is_axis_in_position(axis, position)` (used to
+gate `VERIFY_*` state transitions) is stricter -- it also checks the real
+position against the target -- so this failure mode stalls silently at the
+relevant `VERIFY_*` state rather than proceeding with the tool in the
+wrong place, but never reports an error either.
+
 **Every axis is zero-based, matching where it physically starts, with range
 `[retracted_distance, extended_distance]`:**
 
