@@ -27,6 +27,16 @@ here on its own.
   visualization support functions. No LinuxCNC dependency at all -- this
   is the one file here that predates the rest of this folder.
 
+- **`test_forge_brain.py`** -- `ForgeBrain.load_jsonl()`'s
+  `retracted_distance` offset (`_retracted_offset_mm()`): a toolpath's own
+  zero coordinate lands exactly on `retracted_distance` (not below it) once
+  parsed, relative spacing between operations is preserved, `rotation` (A)
+  is never offset, the JSONL file on disk is never modified, and every
+  operation in this project's real example toolpaths
+  (`toolpaths/*.jsonl`) lands within `[retracted_distance,
+  extended_distance]` once offset. See `docs/hardware_setup.md` section 10
+  and `docs/toolpath_slicer.md` for why this offset exists.
+
 - **`test_joint_configuration.py`** -- `lcaf.utils.joint_configuration`:
   that negative/positive limit-switch inputs are rejected when they're
   wired to the same pin (`JointConfiguration.__post_init__`), and that

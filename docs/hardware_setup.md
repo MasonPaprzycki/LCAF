@@ -403,8 +403,16 @@ need to convert a toolpath file to inches.
   limit floor -- so the practical range is `[0.25, extended_distance]`. The
   toolpath planner's own X=0 is the clamp at the physical switch, not the
   post-backoff resting point (see
-  [toolpath_slicer.md](toolpath_slicer.md)), so a normal toolpath needs no
-  manual coordinate-shifting to fit this range.
+  [toolpath_slicer.md](toolpath_slicer.md)) -- a toolpath's own zero
+  coordinate would therefore command the joint below its own soft limit
+  floor if commanded as-is. `ForgeBrain.load_jsonl()` corrects for this at
+  parse time (`_retracted_offset_mm()`): every parsed `x`/`y`/`die_gap` is
+  offset by that joint's own `retracted_distance` (converted to
+  millimetres), so a toolpath's own zero always lands exactly on
+  `retracted_distance`, not below it -- without ever touching the JSONL
+  file itself. `rotation` (A) is never offset -- A has no
+  `retracted_distance` (see section 6), so there is no standoff position to
+  shift toward.
 - **A**: `retracted_distance` and `extended_distance` are both `null`
   (section 6) -- genuinely unbounded, not a symmetric range. 0 is wherever
   it was sitting at power-on; it is free to move either direction from

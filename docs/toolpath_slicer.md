@@ -57,6 +57,16 @@ the final **machine Z coordinate**, not an inferred physical gap.
   is measured from that end, increasing outward toward the free/forged end.
   `x_offset_mm` adds on top of this if the clamp itself sits some fixed
   distance from machine X=0 rather than exactly at it.
+
+  This generated X (and Y, and `die_gap`/Z) is deliberately left zero-based
+  at the physical switch, matching LinuxCNC's own machine coordinate 0 --
+  this module never shifts it to account for `retracted_distance` (the
+  joint's post-homing standoff position and real soft-limit floor, see
+  `docs/hardware_setup.md` sections 7 and 10). That correction happens once,
+  later, when the JSONL is actually loaded
+  (`ForgeBrain.load_jsonl()`/`_retracted_offset_mm()`), not here -- so this
+  module's own output, and any JSONL file it wrote, never needs editing
+  when `retracted_distance` changes.
 - **Y** is the radial axis the lower die -- the one whose geometry is
   configured -- lies along.
 - **Z** is the radial axis the upper die (a flat-faced circular disc) travels

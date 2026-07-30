@@ -264,12 +264,39 @@ class ForgeBrain:
     def shutdown(self):
         self.running = False
 
+    def _retracted_offset_mm(self, axis_name: str) -> float:
+        """
+        This joint's own retracted_distance (its soft-limit floor -- see
+        JointConfiguration.retracted_distance), converted to machine units
+        (mm). A JSONL toolpath's own coordinate frame treats 0 as this
+        project's parked/standoff position, not the physical negative limit
+        switch -- but the switch, not the standoff, is where LinuxCNC's own
+        machine coordinate 0 actually is (see docs/hardware_setup.md section
+        10), and MIN_LIMIT is retracted_distance, not 0. Without this
+        offset, a toolpath's own zero coordinate would command the joint
+        below its own soft limit floor. None (a genuinely disabled soft
+        limit -- this project's A axis) offsets by 0, since there is no
+        floor to stand off from.
+        """
+        joint = self.motion.axes[axis_name].axial_interface.joint
+        if joint.retracted_distance is None:
+            return 0.0
+        return self.motion.axes[axis_name].axial_interface.to_machine_units(joint.retracted_distance)
+
     def load_jsonl(self, filename: str):
 
         """
         Load a JSONL forging program.
 
-        Each line is one ToolpathOperation.
+        Each line is one ToolpathOperation. x/y/die_gap are read directly
+        from the file and then offset by their own joint's
+        retracted_distance (_retracted_offset_mm() above) -- so the file
+        itself never needs editing to account for this project's soft
+        limits, and its own zero coordinate always lands exactly on the
+        joint's parked/standoff position rather than below it. rotation
+        (A) is never offset -- A has no retracted_distance (see
+        JointConfiguration.retracted_distance), so there is no standoff
+        position to shift toward.
         """
 
         self.queue.reset()
@@ -278,6 +305,10 @@ class ForgeBrain:
 
         if not path.exists():
             raise FileNotFoundError(path)
+
+        x_offset = self._retracted_offset_mm("x")
+        y_offset = self._retracted_offset_mm("y")
+        z_offset = self._retracted_offset_mm("z")
 
         with open(path, "r") as file:
 
@@ -300,9 +331,9 @@ class ForgeBrain:
                             data["operation"].upper()
                         ],
 
-                        x=data.get("x", 0.0),
-                        y=data.get("y", 0.0),
-                        die_gap=data.get("die_gap", 0.0),
+                        x=data.get("x", 0.0) + x_offset,
+                        y=data.get("y", 0.0) + y_offset,
+                        die_gap=data.get("die_gap", 0.0) + z_offset,
                         rotation=data.get("rotation", 0.0),
                         target_temperature=data.get("target_temperature",0.0),
                         metadata=data.get("metadata", {})

@@ -41,7 +41,7 @@
         "inverted": false,
         "invert_negative_limit": true,
         "invert_positive_limit": false,
-        "home_sequence": 1,
+        "home_sequence": 2,
         "retracted_distance": 0.25,
         "extended_distance": 2.5
     },
