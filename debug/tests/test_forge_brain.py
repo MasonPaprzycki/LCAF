@@ -22,9 +22,11 @@ class ToolpathRetractedDistanceOffsetTests(unittest.TestCase):
     correcting for that, a toolpath's own zero coordinate commands the
     joint below its own soft limit floor -- exactly what real-hardware
     testing hit. ForgeBrain.load_jsonl() now offsets every parsed
-    x/y/die_gap by that joint's own retracted_distance (converted to
-    machine units/mm via _retracted_offset_mm()) so the toolpath file
-    itself never needs editing.
+    x/y/die_gap by that joint's own parked reference (retracted_distance,
+    or extended_distance for a flip_retraction joint -- this project's Y,
+    since it parks at the far end of its travel instead of the near one),
+    converted to machine units/mm via _retracted_offset_mm(), so the
+    toolpath file itself never needs editing.
     """
 
     def setUp(self):
@@ -42,8 +44,13 @@ class ToolpathRetractedDistanceOffsetTests(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def axis_offset_mm(self, axis_name: str) -> float:
+        # Mirrors ForgeBrain._retracted_offset_mm(): the joint's parked
+        # reference is extended_distance for a flip_retraction joint (this
+        # project's Y), retracted_distance for every other joint.
         axial = self.motion.axes[axis_name].axial_interface
-        return axial.to_machine_units(axial.joint.retracted_distance)
+        joint = axial.joint
+        reference = joint.extended_distance if joint.flip_retraction else joint.retracted_distance
+        return axial.to_machine_units(reference)
 
     def axis_bounds_mm(self, axis_name: str):
         """

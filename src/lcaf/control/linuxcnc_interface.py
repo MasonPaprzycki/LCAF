@@ -3,7 +3,10 @@ from lcaf.utils.joint_configuration import JointConfiguration
 
 import linuxcnc
 import hal
+import logging
 import time
+
+_logger = logging.getLogger("ForgeBrain.Motion.LinuxCNCInterface")
 
 
 class LinuxCNCMachineInterface:
@@ -422,6 +425,12 @@ class LinuxCNCAxialInterface:
 
     # MDI
     def execute_mdi(self, mdi):
+        # Logged so a LinuxCNC NML rejection drained later by
+        # LinuxCNCMachineInterface.get_errors() (MotionCoordinator.poll())
+        # can be matched back to the exact line that triggered it -- the
+        # rejection itself carries no reference to the command that caused
+        # it otherwise.
+        _logger.info(f"joint {self.joint.joint} ({self.joint.axis}): MDI {mdi}")
         self.command.mode(linuxcnc.MODE_MDI)
         self.command.wait_complete()
         self.command.mdi(mdi)

@@ -266,22 +266,26 @@ class ForgeBrain:
 
     def _retracted_offset_mm(self, axis_name: str) -> float:
         """
-        This joint's own retracted_distance (its soft-limit floor -- see
-        JointConfiguration.retracted_distance), converted to machine units
-        (mm). A JSONL toolpath's own coordinate frame treats 0 as this
-        project's parked/standoff position, not the physical negative limit
-        switch -- but the switch, not the standoff, is where LinuxCNC's own
-        machine coordinate 0 actually is (see docs/hardware_setup.md section
-        10), and MIN_LIMIT is retracted_distance, not 0. Without this
-        offset, a toolpath's own zero coordinate would command the joint
-        below its own soft limit floor. None (a genuinely disabled soft
-        limit -- this project's A axis) offsets by 0, since there is no
-        floor to stand off from.
+        This joint's own parked/retracted reference point -- retracted_distance
+        (its soft-limit floor), or extended_distance if this joint's
+        axis.json sets flip_retraction (this project's Y -- see
+        JointConfiguration.flip_retraction and Axis.__init__'s
+        retracted_position) -- converted to machine units (mm). A JSONL
+        toolpath's own coordinate frame treats 0 as this project's
+        parked/standoff position, not the physical negative limit switch --
+        but the switch, not the standoff, is where LinuxCNC's own machine
+        coordinate 0 actually is (see docs/hardware_setup.md section 10),
+        and MIN_LIMIT/MAX_LIMIT are retracted_distance/extended_distance,
+        not 0. Without this offset, a toolpath's own zero coordinate would
+        command the joint outside its own soft limit. None (a genuinely
+        disabled soft limit -- this project's A axis) offsets by 0, since
+        there is no floor to stand off from.
         """
         joint = self.motion.axes[axis_name].axial_interface.joint
-        if joint.retracted_distance is None:
+        reference = joint.extended_distance if joint.flip_retraction else joint.retracted_distance
+        if reference is None:
             return 0.0
-        return self.motion.axes[axis_name].axial_interface.to_machine_units(joint.retracted_distance)
+        return self.motion.axes[axis_name].axial_interface.to_machine_units(reference)
 
     def load_jsonl(self, filename: str):
 
