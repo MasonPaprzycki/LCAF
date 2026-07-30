@@ -7,6 +7,7 @@ from pathlib import Path
 from lcaf.utils.joint_configuration import (
     JointConfiguration,
     MachineConfiguration,
+    _inverted_input_pin,
     generate_hal,
     generate_ini,
     load_machine_configuration,
@@ -116,7 +117,17 @@ class GeneratedHalLimitSwitchWiringTests(unittest.TestCase):
             if not joint.has_limit_switches:
                 continue
 
-            neg_line = f"net {joint.axis.lower()}-neg-lim {joint.negative_limit_input} => {joint.negative_limit_hal_pin}"
+            # This project's real X/Y/Z switches are wired normally-closed
+            # and invert_negative_limit is set true to match (see
+            # docs/hardware_setup.md section 5) -- generate_hal() then wires
+            # the field input's inverted "-not" sibling pin rather than the
+            # raw one.
+            expected_pin = (
+                _inverted_input_pin(joint.negative_limit_input)
+                if joint.invert_negative_limit
+                else joint.negative_limit_input
+            )
+            neg_line = f"net {joint.axis.lower()}-neg-lim {expected_pin} => {joint.negative_limit_hal_pin}"
             self.assertIn(neg_line, hal_text)
 
             # This project's real X/Y/Z are single-switch (negative only --

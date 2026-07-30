@@ -386,9 +386,19 @@ class MotionCoordinator:
         class: Axis.is_homed() (and therefore all_homed() below) only
         becomes true once that backoff has finished too, independently per
         axis, with no cross-axis sequencing needed.
+
+        Switches the shared command channel to MANUAL mode once, up front
+        (LinuxCNCMachineInterface.ensure_manual_mode()), rather than letting
+        each axis's own lazily-triggered start_homing() re-issue that same
+        machine-wide mode switch redundantly -- since every axis starts
+        homing within this same heartbeat (see below), that used to mean up
+        to four back-to-back mode-switch round trips over the one shared
+        NML channel with no gap between them.
         """
 
         self.logger.info("HOMING START: all axes")
+
+        self.interface.ensure_manual_mode()
 
         for name, motor in self.axes.items():
             try:

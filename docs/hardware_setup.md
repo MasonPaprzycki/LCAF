@@ -115,10 +115,8 @@ other to the input pin -- so a broken wire or short reads as a fault
 limit." A has no limit switches; see section 6 for why.
 
 Use the table in section 1 for which TB6 pin is which joint's negative/
-positive input. If your switches are wired the opposite way (normally
-open, or you can't rewire them), set `invert_negative_limit` /
-`invert_positive_limit` as true for that joint in `axis.json` instead of
-rewiring. The two switches on a joint must be different physical inputs --
+positive input. If your switches are normally closed, set `invert_negative_limit` /
+`invert_positive_limit` as true for that joint in `axis.json`. If they are normally open set as false. The two switches on a joint must be different physical inputs --
 `JointConfiguration` refuses to load an `axis.json` that wires
 `negative_limit_input` and `positive_limit_input` to the same pin, since
 there would be no way to tell which end of travel was actually reached.

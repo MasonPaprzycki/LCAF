@@ -83,6 +83,24 @@ class LinuxCNCMachineInterface:
     def abort(self):
         self.command.abort()
 
+    def ensure_manual_mode(self):
+        """
+        Switch the single shared NML command channel to MANUAL mode once,
+        machine-wide. Every joint's native homing/retract-to-zero
+        (LinuxCNCAxialInterface.start_homing/start_retract_to_zero) requires
+        MANUAL mode -- previously each axis re-issued this same mode
+        switch + wait_complete() itself, redundantly, every time its own
+        homing lazily kicked off. Since all axes share this one connection
+        (LinuxCNC exposes one command channel for the whole machine, not one
+        per joint) and MotionCoordinator.home_all() starts every axis
+        homing within the same heartbeat, that meant up to four back-to-back
+        mode-switch round trips over the one channel with no gap between
+        them, right as the first joint's search move was starting. Calling
+        this once up front (home_all()) avoids that redundant churn.
+        """
+        self.command.mode(linuxcnc.MODE_MANUAL)
+        self.command.wait_complete()
+
     def get_errors(self):
         errors = []
 
@@ -289,13 +307,16 @@ class LinuxCNCAxialInterface:
         Homing speed comes entirely from the generated INI's
         HOME_SEARCH_VEL/HOME_LATCH_VEL (see generate_ini()), not from this
         method -- there is no Python-side jog speed to configure here.
+
+        Requires the shared command channel to already be in MANUAL mode --
+        see LinuxCNCMachineInterface.ensure_manual_mode(), called once by
+        MotionCoordinator.home_all() before any axis's homing starts, rather
+        than every axis re-issuing that same machine-wide mode switch itself.
         """
         self.homing_ever_been_intialized = True
         self._homing_timeout = timeout
         self.poll()
 
-        self.command.mode(linuxcnc.MODE_MANUAL)
-        self.command.wait_complete()
         self.command.home(self.joint.joint)
         self._homing_phase = "native_wait"
         self._homing_start_time = time.monotonic()
@@ -432,9 +453,10 @@ class LinuxCNCAxialInterface:
             # switch and never remeasures travel (MAX_LIMIT is a static INI
             # value regardless of dual_limit_switches -- see
             # generate_ini()), so rerunning it here already is exactly a
-            # retract-to-zero, with no separate code path needed.
-            self.command.mode(linuxcnc.MODE_MANUAL)
-            self.command.wait_complete()
+            # retract-to-zero, with no separate code path needed. Requires
+            # the shared command channel already in MANUAL mode -- see
+            # ensure_manual_mode()/start_homing()'s docstring.
+            self.machine.ensure_manual_mode()
             self.command.home(self.joint.joint)
             self._retract_phase = "native_wait"
 

@@ -98,6 +98,7 @@ class Axis:
                 return
 
             if not self.axial_interface.has_homing_ever_been_intialized():
+                self.logger.info(f"{self.axis}: Issuing native home command to LinuxCNC.")
                 self.axial_interface.start_homing()
                 return
 
