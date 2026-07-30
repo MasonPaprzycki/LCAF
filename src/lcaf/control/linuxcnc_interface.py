@@ -85,12 +85,25 @@ class LinuxCNCMachineInterface:
 
     def ensure_manual_mode(self):
         """
-        Switch the single shared NML command channel to MANUAL mode once,
-        machine-wide. Native homing/retract-to-zero
-        (home_all_command() below, LinuxCNCAxialInterface.
-        start_retract_to_zero()) requires MANUAL mode.
+        Switch the single shared NML command channel to MANUAL task mode
+        and joint (non-teleop) jogging mode, machine-wide. Native
+        homing/retract-to-zero (home_all_command() below,
+        LinuxCNCAxialInterface.start_retract_to_zero()) requires both:
+        command.home(joint) for a directly-numbered joint rejects with
+        "must be in joint mode to home" (NML error, drained by
+        LinuxCNCMachineInterface.get_errors()) without the
+        teleop_enable(0) call -- found during real-hardware testing, after
+        a directly-numbered retract-to-zero home() was rejected even though
+        the exact same MANUAL-mode-only sequence had just successfully run
+        the initial "Home All" (command.home(-1)) moments earlier. MANUAL
+        task mode and joint/teleop mode are independent LinuxCNC state --
+        command.mode() alone does not imply teleop_enable(0), and nothing
+        else in this project ever explicitly returns the machine to joint
+        mode once anything switches it away (e.g. plain MDI motion,
+        typically Cartesian/teleop by convention).
         """
         self.command.mode(linuxcnc.MODE_MANUAL)
+        self.command.teleop_enable(0)
         self.command.wait_complete()
 
     def home_all_command(self):

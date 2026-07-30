@@ -43,6 +43,9 @@ class FakeCommand:
     def mode(self, mode):
         self._record("mode", mode)
 
+    def teleop_enable(self, enable):
+        self._record("teleop_enable", enable)
+
     def wait_complete(self):
         self._record("wait_complete")
 

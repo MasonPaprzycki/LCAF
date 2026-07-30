@@ -101,6 +101,15 @@ class HomeAllCommandTests(unittest.TestCase):
         mode_calls = [c for c in self.command.calls if c[0] == "mode"]
         self.assertEqual(len(mode_calls), 1)
 
+        # LinuxCNC rejects a directly-numbered command.home(joint) with
+        # "must be in joint mode to home" unless teleop_enable(0) has been
+        # called -- MANUAL task mode alone is not sufficient (see
+        # ensure_manual_mode()'s docstring). Home All needs the machine in
+        # the same state.
+        teleop_calls = [c for c in self.command.calls if c[0] == "teleop_enable"]
+        self.assertEqual(len(teleop_calls), 1)
+        self.assertEqual(teleop_calls[0][1], 0)
+
 
 class NativeHomingTests(unittest.TestCase):
     """

@@ -314,6 +314,26 @@ established by that initial homing (native homing never remeasures travel
 either way -- see section 7 -- so this holds regardless of
 `dual_limit_switches`).
 
+Unlike the initial `command.home(-1)` "Home All" above, this re-seek
+issues a directly-numbered `command.home(joint)` for just this one axis
+(only it is retracting at that point, not the whole machine -- see section
+7). LinuxCNC requires the shared command channel to be in joint
+(non-teleop) jogging mode for that directly-numbered form specifically --
+`LinuxCNCMachineInterface.ensure_manual_mode()` calls
+`command.teleop_enable(0)` for exactly this reason. Real-hardware testing
+hit this directly: the very first toolpath's `RETRACT_Z` step rejected its
+`command.home(2)` with NML error `"must be in joint mode to home"`, even
+though the identical MANUAL-mode-only sequence had just successfully run
+the initial "Home All" moments earlier in the same session -- apparently
+because completing "Home All" itself leaves the machine in teleop/Cartesian
+jogging mode (the normal mode for regular jogging afterward), not joint
+mode. Without `teleop_enable(0)`, the rejected `command.home()` never
+actually starts, `status.joint[n]['homed']` never resets, and
+`poll_retract_to_zero()`'s native-homing branch sees the *already-homed*
+flag from the original `home_all()` still sitting there and immediately
+(and wrongly) reports the retract complete without the joint ever having
+moved.
+
 **Y is the one exception:** `JointConfiguration.retract_to` is set to `1.5`
 for it, because Y's retracted position is mechanically partway into its
 positive-direction travel, not zero -- there is no positive limit switch to
