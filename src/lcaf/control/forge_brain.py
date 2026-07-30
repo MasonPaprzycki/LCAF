@@ -382,13 +382,12 @@ class ForgeBrain:
                 )
                 return
 
-        # motion.all_homed() (not interface.all_homed()) -- home_all() now
-        # homes and retracts one axis at a time, and the last axis in that
-        # sequence reports raw is_homed() True before its own retract has
-        # even started. interface.all_homed() only reflects that raw
-        # per-axis flag, so it would (briefly) read True one retract early;
-        # motion.all_homed() tracks the whole sequential home+retract
-        # sequence instead -- see MotionCoordinator.home_all().
+        # motion.all_homed() -- each Axis's own is_homed(), true once
+        # LinuxCNC's native "Home All" backs it off to its own
+        # retracted_distance (see MotionCoordinator.home_all()). Homing
+        # happens exactly once here, at startup; MotionCoordinator never
+        # re-homes an axis afterward -- a toolpath operation's own retract
+        # steps are plain commanded moves, not a re-home (docs/state_machine.md).
         if not self.motion.all_homed():
 
             faulted_axis = self.motion.first_faulted_axis()

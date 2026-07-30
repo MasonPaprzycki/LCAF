@@ -272,12 +272,9 @@ joint has already backed off the switch -- there is nothing further for
 this project's own code to command. Joints in different `HOME_SEQUENCE`
 groups finish at different times purely because LinuxCNC's own sequencer
 moves on to the next group as soon as the current one finishes; this
-project's own polling doesn't gate one axis on another either way. A
-later retract-to-zero
-(`LinuxCNCAxialInterface.start_retract_to_zero()`/
-`poll_retract_to_zero()`) is different: it re-seeks one specific joint by
-number (`command.home(joint)`, not `-1`), since only that one joint is
-retracting at that point in a toolpath operation, not the whole machine.
+project's own polling doesn't gate one axis on another either way. This is
+the only homing this project ever does per process -- a later retract
+(section 7's "Retract" below) is a plain commanded move, never a re-home.
 
 **This also matters for correctness, not just convenience:** `HOME` must
 itself fall within `[MIN_LIMIT, MAX_LIMIT]`. Leaving `HOME` at `0.0` while
@@ -296,68 +293,39 @@ native homing never remeasures travel regardless of it (see
 builds one or two fake limit switches, and cross-checks that
 `positive_limit_input` is set/unset consistently with it.
 
-### Retract-to-zero: re-seeking the switch every retract, not just at boot
+### Retract: a plain commanded move to a configured soft limit, not a re-home
 
 Every toolpath operation starts with `MotionCoordinator` retracting Z, then
-Y, then X (`docs/state_machine.md`). Because these are open-loop stepper
-joints with no position feedback (`docs/potential_issues.md`), a plain
-"move to the commanded 0.0" retract would trust whatever position this
-project's own bookkeeping has accumulated, which can silently drift from
-the true mechanical zero if a step was ever missed mid-session. Instead,
-`MotionCoordinator.retract_axis()` -> `Axis.retract_to_zero()` ->
-`LinuxCNCAxialInterface.start_retract_to_zero()`/`poll_retract_to_zero()`
-re-seeks the negative limit switch on **every** retract (not just the
-one-time `home_all()` at process start, by re-running LinuxCNC's own native
-homing sequence) and re-zeros from that physical reference, the same way
-initial homing does -- it just never touches the `max_limit`/travel
-established by that initial homing (native homing never remeasures travel
-either way -- see section 7 -- so this holds regardless of
-`dual_limit_switches`).
+Y, then X (`docs/state_machine.md`). Retracting an axis
+(`MotionCoordinator.retract_axis()` -> `Axis.retract()`) is a plain MDI
+move through `LinuxCNCAxialInterface.move()` -- mechanically identical to
+`Axis.move()`/`MOVING`, just to a fixed, pre-configured target instead of
+an operation's own commanded coordinate. This project homes exactly once
+per process, at startup (`ForgeBrain.INITIALIZING` ->
+`MotionCoordinator.home_all()` -- see "Home All is one command" above);
+retracting never re-homes and never re-seeks a limit switch again
+afterward.
 
-Unlike the initial `command.home(-1)` "Home All" above, this re-seek
-issues a directly-numbered `command.home(joint)` for just this one axis
-(only it is retracting at that point, not the whole machine -- see section
-7). LinuxCNC requires the shared command channel to be in joint
-(non-teleop) jogging mode for that directly-numbered form specifically --
-`LinuxCNCMachineInterface.ensure_manual_mode()` calls
-`command.teleop_enable(0)` for exactly this reason. Real-hardware testing
-hit this directly: the very first toolpath's `RETRACT_Z` step rejected its
-`command.home(2)` with NML error `"must be in joint mode to home"`, even
-though the identical MANUAL-mode-only sequence had just successfully run
-the initial "Home All" moments earlier in the same session -- apparently
-because completing "Home All" itself leaves the machine in teleop/Cartesian
-jogging mode (the normal mode for regular jogging afterward), not joint
-mode. Without `teleop_enable(0)`, the rejected `command.home()` never
-actually starts, `status.joint[n]['homed']` never resets, and
-`poll_retract_to_zero()`'s native-homing branch sees the *already-homed*
-flag from the original `home_all()` still sitting there and immediately
-(and wrongly) reports the retract complete without the joint ever having
-moved.
+Each joint's retract target is `JointConfiguration.flip_retraction`
+(`axis.json`): `false` (default) retracts to `retracted_distance`, the
+near/standoff end of this joint's own soft-limit range; `true` retracts to
+`extended_distance`, the far end instead. **Y is the one exception** --
+it's the one joint with `flip_retraction: true`, because Y's retracted
+position is mechanically at the far end of its travel, not the near one.
+`Axis.retract()` picks the target once, in `Axis.__init__`
+(`self.retracted_position`), from whichever this joint's `axis.json` sets.
 
-**Y is the one exception:** `JointConfiguration.retract_to` is set to `1.5`
-for it, because Y's retracted position is mechanically partway into its
-positive-direction travel, not zero -- there is no positive limit switch to
-re-seek against either (section 5). So for Y, `start_retract_to_zero()`
-instead commands a plain MDI move to `retract_to` in the coordinate
-frame the last `home_all()` already established, and `poll_retract_to_zero()`
-waits for the joint to report in-position rather than for a switch to trip.
-This never re-references `position_offset_to_native` the way the
-negative-switch retract does, so it does not correct for stepper drift the
-same way -- Y still gets a fresh `home_all()` reference every process
-start (section 9) like every other joint, it just isn't re-referenced on
-every single retract. Every other joint keeps `retract_to: null`
-and behaves as described above.
-
-This means the negative switch is now tripped deliberately, routinely,
-every single operation cycle -- not just once at boot the way the rest of
-this document originally described hard-limit trips ("this should never
-happen in normal operation," section 5's "What a tripped limit switch
-actually does"). The same `HOME_IGNORE_LIMITS` setting covers it (section
-7), so it still never trips LinuxCNC's machine-wide hard-limit fault -- but
-it does mean the negative switch on X/Y/Z sees far more physical actuations
-over the life of the machine than a one-time homing switch would. Budget
-for that in switch selection/maintenance if this matters for your
-hardware.
+Because these are open-loop stepper joints with no position feedback
+(`docs/potential_issues.md`), this command trusts whatever position this
+project's own bookkeeping has accumulated since the last `home_all()` --
+same as any other MDI move (`MOVE_X`/`MOVE_Y`/`MOVE_Z`), and the same
+following-error tolerance (`FERROR`/`MIN_FERROR`, section 9) is what would
+catch a stall or skipped step. A hard-limit trip during a retract is
+therefore a genuine fault, not an expected/ignored condition the way it is
+during `HOMING` (`Axis.poll()` in `axis.py`) -- retracting never
+deliberately drives onto a switch. Retracting an axis that has never
+completed `HOMING` this session is also rejected as a fault
+(`Axis.poll()`'s `RETRACTING` branch), rather than silently moving.
 
 ## 8. Motor configuration fields (`axis.json`)
 
@@ -378,7 +346,7 @@ motor, set these:
 | `is_angular` | `true` for A only. |
 | `has_limit_switches` | `false` for A only -- see section 6. |
 | `dual_limit_switches` | `true` if this joint has a switch at *both* ends of travel and homing should measure the real distance between them; `false` (this project's actual X/Y/Z, despite `true` being the class default) if it only has the one negative/zero-end switch, in which case `positive_limit_input` must be `null` and the configured `extended_distance` is trusted as-is rather than measured. Only meaningful when `has_limit_switches` is `true` -- see section 7. |
-| `retract_to` | The absolute position (native units, same zero as `retracted_distance`/`extended_distance`) this joint moves to on retract instead of re-seeking the negative limit switch -- `1.5` for Y (see section 7's "Retract-to-zero"). `null` (default) for every other joint. Must fall within `[retracted_distance, extended_distance]` when both are configured. |
+| `flip_retraction` | `false` (default): this joint retracts to `retracted_distance`, the near/standoff end of its soft-limit range. `true`: retracts to `extended_distance`, the far end instead -- set for Y only (see section 7's "Retract"), since Y's retracted position is mechanically at the far end of its travel. `true` requires `extended_distance` to be configured. |
 | `inverted` | `true` if the joint moves the wrong physical direction. Flips the motor's direction in software; the normal fix for a reversed motor/lead, cheaper than re-wiring. |
 | `invert_negative_limit` / `invert_positive_limit` | `true` if that limit switch reads backwards from the normally-closed wiring in section 5. |
 | `home_sequence` | See section 7. Leave at `-1` to home this joint on its own in "Home All"; LinuxCNC then defaults it to the joint number. |
@@ -532,10 +500,11 @@ config change.
   `linuxcnc.command()`/`stat()`/`error_channel()` connection -- LinuxCNC
   exposes one NML channel for the whole machine, not one per joint -- and
   issues the one machine-wide native "Home All" (`home_all_command()`, see
-  section 7). `LinuxCNCAxialInterface` is the per-joint half: it knows how
-  to move/read one joint and wait out its own share of that Home All
-  (`begin_homing_wait()`/`poll_homing()`), plus re-home itself individually
-  for a later retract-to-zero.
+  section 7), the only homing this project ever does per process.
+  `LinuxCNCAxialInterface` is the per-joint half: it knows how to move/read
+  one joint and wait out its own share of that Home All
+  (`begin_homing_wait()`/`poll_homing()`); a later retract is just its
+  ordinary `move()`, not a separate re-homing path.
 
 - **`axis.py`**'s `Axis` wraps one `LinuxCNCAxialInterface` with a small
   state machine of its own (`UNINITIALIZED -> READY -> MOVING/HOMING`, plus
@@ -549,10 +518,9 @@ config change.
   fixed safe motion order (retract Z/Y/X, rotate A, move X/Y/Z). *That
   order* is the invariant not to be casually changed, for the same reason
   `forge_brain.py`'s HSFM shape is treated as stable -- what each retract
-  step actually *does* underneath it has changed at least once already
-  (retract-to-zero re-seeks the negative limit switch instead of a plain
-  MDI move to 0.0 -- see section 7's "Retract-to-zero" above), without
-  touching the order or the state names themselves.
+  step actually *does* underneath it has changed more than once already
+  (see section 7's "Retract" above), without touching the order or the
+  state names themselves.
 
 - **`forge_brain.py`** (untouched) only ever talks to `MotionCoordinator`
   through `self.motion.interface` (machine-wide queries/commands) and

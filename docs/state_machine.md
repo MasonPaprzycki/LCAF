@@ -135,13 +135,13 @@ EXECUTE_OPERATION
 │   ↓                                       │
 │ VERIFY_ROTATION                           │
 │   ↓                                       │
-│ MOVE_X                                   │
+│ MOVE_X                                    │
 │   ↓                                       │
-│ VERIFY_X_POSITION 
-|   ↓ 
-│ MOVE_Y                                   │
+│ VERIFY_X_POSITION                         |
+|   ↓                                       |
+│ MOVE_Y                                    │
 │   ↓                                       │
-│ VERIFY_Y_POSITION                      │
+│ VERIFY_Y_POSITION                         │
 │   ↓                                       │
 │ MOVE_Z                                    │
 │   ↓                                       │
@@ -471,19 +471,20 @@ IDLE → RETRACT_Z
 
 Purpose
 
-Return the Z axis to zero before any lateral or rotational movement -- not
-by commanding a plain move to the coordinate 0.0, but by re-seeking Z's own
-negative limit switch and re-zeroing from that physical reference (see
-`docs/hardware_setup.md` section 7, "Retract-to-zero"). These are
-open-loop stepper joints with no position feedback
-(`docs/potential_issues.md`), so re-referencing to the switch on every
-retract -- not just once at `home_all()` -- is what catches drift a plain
-commanded move could silently carry forward.
+Return the Z axis to its configured retract position before any lateral or
+rotational movement -- a plain commanded move to `retracted_distance` (or
+`extended_distance` if this joint's `axis.json` sets `flip_retraction`),
+through LinuxCNC's ordinary MDI motion, exactly like `MOVE_Z` later in this
+same sequence. This project homes exactly once, at startup
+(`INITIALIZING` -> `MotionCoordinator.home_all()`); it never re-seeks a
+limit switch again afterward, so retracting never re-homes and never
+re-references `position_offset_to_native` -- see `docs/hardware_setup.md`
+section 7.
 
 Responsibilities
 
-- Command Z axis retract-to-zero (`Axis.retract_to_zero()`) through LinuxCNC
-- Monitor retract-to-zero progress
+- Command Z axis retract (`Axis.retract()`) through LinuxCNC
+- Monitor retract progress
 
 Transition
 
@@ -497,12 +498,12 @@ RETRACT_Z → VERIFY_Z_RETRACTED
 
 Purpose
 
-Confirm the Z axis has re-seeked its negative limit switch and re-zeroed.
+Confirm the Z axis has reached its configured retract position.
 
 Responsibilities
 
 - Verify LinuxCNC motion completion
-- Verify retract-to-zero has completed (`Axis.is_retracted()`)
+- Verify the retract has completed (`Axis.is_retracted()`)
 
 Transition
 
@@ -522,19 +523,18 @@ VERIFY_Z_RETRACTED → FAULT
 
 Purpose
 
-Return Y then X to zero, each by re-seeking its own negative limit switch
-and re-zeroing from that physical reference -- same mechanism and same
-reasoning as RETRACT_Z above (`docs/hardware_setup.md` section 7). The
-actual code (`motion_coordinator.py`) sequences these as separate
-RETRACT_Y/VERIFY_Y_RETRACTED then RETRACT_X/VERIFY_X_RETRACTED states, not
-a single combined XY step -- this diagram groups them for brevity, but see
-the "Motion Coordinator HFSM" diagram earlier in this document for the
-exact per-axis states.
+Return Y then X to their own configured retract positions, each by the
+same plain commanded move as RETRACT_Z above (`docs/hardware_setup.md`
+section 7). The actual code (`motion_coordinator.py`) sequences these as
+separate RETRACT_Y/VERIFY_Y_RETRACTED then RETRACT_X/VERIFY_X_RETRACTED
+states, not a single combined XY step -- this diagram groups them for
+brevity, but see the "Motion Coordinator HFSM" diagram earlier in this
+document for the exact per-axis states.
 
 Responsibilities
 
-- Command X/Y retract-to-zero (`Axis.retract_to_zero()`) through LinuxCNC
-- Monitor retract-to-zero progress
+- Command X/Y retract (`Axis.retract()`) through LinuxCNC
+- Monitor retract progress
 
 Transition
 
@@ -548,12 +548,12 @@ RETRACT_XY → VERIFY_XY_RETRACTED
 
 Purpose
 
-Confirm X and Y have each re-seeked their negative limit switch and re-zeroed.
+Confirm X and Y have each reached their configured retract position.
 
 Responsibilities
 
 - Verify LinuxCNC motion completion
-- Verify retract-to-zero has completed for each axis (`Axis.is_retracted()`)
+- Verify the retract has completed for each axis (`Axis.is_retracted()`)
 
 Transition
 
@@ -896,24 +896,22 @@ HOMING → FAULT
 
 ### RETRACTING
 
-The axis is re-seeking its own negative limit switch to re-zero before a
-retract move, exactly like HOMING's seek phase mechanically -- driven by
-`LinuxCNCAxialInterface.start_retract_to_zero()`/`poll_retract_to_zero()`,
-which (unlike HOMING's `begin_homing_wait()`/`poll_homing()`) issues its
-own directly-numbered `command.home(joint)` for just this one axis, since
-only this joint is retracting at that point, not the whole machine -- and
-requires the axis to have already completed HOMING at least once this
-session. Unlike HOMING it
-never re-measures this axis's travel range -- it only re-establishes where
-zero is. Entered once per retract by `MotionCoordinator` (see the
-"Retract-to-zero" note under `docs/hardware_setup.md` section 7), not just
-once per session the way HOMING is.
+The axis is executing a plain position command through LinuxCNC to its
+configured retract position (`retracted_distance`, or `extended_distance`
+if this joint's `axis.json` sets `flip_retraction`) -- mechanically no
+different from MOVING, just to a fixed, pre-configured target rather than
+an operation's own commanded coordinate. This project homes exactly once,
+at startup (see HOMING below); RETRACTING never re-homes and never
+re-seeks a limit switch. It does require the axis to have already
+completed HOMING at least once this session -- entered once per retract by
+`MotionCoordinator` (`Axis.retract()`), not just once per session the way
+HOMING is.
 
-Motion continues until the negative limit switch signal. The Axis object
-does not directly terminate motion -- as with HOMING, it reports the event
+The Axis object does not directly terminate motion. It reports the event
 and LinuxCNC remains responsible for stopping the commanded motion. A hard
-limit trip on this axis is expected here, the same way it is during
-HOMING, and does not fault it.
+limit trip on this axis during RETRACTING is a genuine fault, the same way
+it is during MOVING -- unlike HOMING, RETRACTING never deliberately drives
+onto a switch.
 
 Transitions
 
@@ -971,8 +969,9 @@ Examples include
 - Communication failure
 - Unexpected loss of axis state
 - Invalid motion command
-- Homing or retract-to-zero timing out or reporting a joint fault before
-  the expected limit switch/native-homed status was observed
+- Homing timing out or reporting a joint fault before the expected
+  limit-switch/native-homed status was observed
+- Retracting before this axis has ever completed homing this session
 
 Responsibilities
 

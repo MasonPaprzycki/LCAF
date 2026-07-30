@@ -1,19 +1,21 @@
 # Potential Issues
 
-- **Retract-to-zero trips the negative limit switch on every retract, not
-  just at boot.** `MotionCoordinator.retract_axis()` re-seeks X/Y/Z's own
-  negative limit switch on every single retract (see
-  `docs/hardware_setup.md` section 7, "Retract-to-zero") rather than
-  trusting a plain commanded move to 0.0 -- deliberate, since these are
-  open-loop steppers with no position feedback and a plain move could
-  silently carry forward drift. The tradeoff: a switch that used to see one
-  actuation per session (at `home_all()`) now sees one per operation, for
-  the life of the machine. This relies on `HOME_IGNORE_LIMITS` (see
-  `docs/hardware_setup.md` section 7) succeeding on every one of those
-  retracts, the same mechanism initial homing already depends on -- nothing
-  new there, just far more frequent. Worth watching during commissioning:
-  switch mechanical life, and whether the extra seek time per operation is
-  acceptable for cycle time on a real toolpath.
+- **Retracting no longer re-references the negative limit switch, so
+  open-loop stepper drift only ever gets corrected once per process.**
+  `MotionCoordinator.retract_axis()` -> `Axis.retract()` is a plain
+  commanded move to `retracted_distance`/`extended_distance` (see
+  `docs/hardware_setup.md` section 7, "Retract") -- mechanically identical
+  to `Axis.move()`/`MOVING`, not a re-home. This project previously
+  re-seeked each switched joint's own negative limit switch on every
+  single retract specifically to catch mid-session drift on these
+  open-loop steppers with no position feedback; that mechanism was removed
+  (deliberately -- retract is meant to always be a plain move to a
+  configured soft limit, never a re-home). The tradeoff: from the one
+  `home_all()` at process start onward, a skipped/missed step on X/Y/Z is
+  only ever caught by LinuxCNC's own following-error tolerance
+  (`FERROR`/`MIN_FERROR`, section 9), the same as any other commanded
+  move -- there is no periodic physical re-reference the way homing itself
+  provides. Worth watching during commissioning and long production runs.
 - **No fault recovery path is implemented.** `AxisState.FAULT` and
   `MotionCoordinatorState.FAULT` are now both reachable (see above), but
   there is still no code anywhere that clears a fault and returns to
@@ -66,8 +68,9 @@
   Pi target) are the only test files -- see `debug/tests/README.md` for
   what each one covers. That coverage is specifically the native homing /
   `HOME_IGNORE_LIMITS` behavior, `dual_limit_switches` single-vs-dual-switch
-  homing, retract-to-zero, and the `is_on_hard_limit()` fault detection
-  described in `docs/hardware_setup.md` sections 5 and 7; most of
+  homing, retract (a plain commanded move -- `flip_retraction`), and the
+  `is_on_hard_limit()` fault detection described in
+  `docs/hardware_setup.md` sections 5 and 7; most of
   `motion_coordinator.py` (everything past the retract states) and
   `axis.py`/`linuxcnc_interface.py` beyond what's listed above still have no
   automated coverage. The fakes model LinuxCNC's Python API surface, not

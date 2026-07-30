@@ -31,10 +31,10 @@ class Axis:
 
     def __init__(self, joint_config: JointConfiguration, machine: LinuxCNCMachineInterface):
 
-        if joint_config.retract_to is None:
-               self.retracted_position = joint_config.retracted_distance
+        if joint_config.flip_retraction:
+            self.retracted_position = joint_config.extended_distance
         else:
-            self.retracted_position = joint_config.retract_to
+            self.retracted_position = joint_config.retracted_distance
 
         self.axis = joint_config.axis.lower()
         self.joint = joint_config.joint
@@ -60,10 +60,14 @@ class Axis:
                 "(following error tripped -- see docs/potential_issues.md)."
             )
 
-        # HOMING is excluded: LinuxCNC's own native homing is used for homing 
-        
+        # HOMING is excluded: LinuxCNC's own native homing (the only homing
+        # this project ever does -- once, at startup) deliberately drives
+        # onto this joint's own negative limit switch to find it.
+        # RETRACTING is a plain commanded move to a configured soft limit
+        # (retracted_position -- see retract() below), never a switch seek,
+        # so a hard-limit trip during it is a genuine fault, same as MOVING.
         if (
-            self.status.state not in (AxisState.FAULT, AxisState.HOMING, AxisState.RETRACTING)
+            self.status.state not in (AxisState.FAULT, AxisState.HOMING)
             and self.axial_interface.is_on_hard_limit()
         ):
             self.status.fault = True
@@ -105,10 +109,16 @@ class Axis:
                 self.status.state = AxisState.FAULT
                 self.logger.error(f"{self.axis}: Homing failed: {e}")
 
-        # Retract-to-zero detection (see retract()/is_retracted())
+        # Retract completion (see retract()/is_retracted()) -- a plain
+        # commanded move to retracted_position, not a re-home: this project
+        # only ever homes once, at startup.
         elif self.status.state == AxisState.RETRACTING:
             try:
                 if not self._retract_command_issued:
+                    if not self.axial_interface.has_axis_been_homed():
+                        raise RuntimeError(
+                            f"{self.axis}: Axis has not been homed; cannot retract."
+                        )
                     if self.retracted_position is None:
                         raise RuntimeError(
                             f"{self.axis}: No retract position configured; cannot move to retract position."
@@ -117,15 +127,16 @@ class Axis:
                     self._retract_command_issued = True
                     return
 
-                elif self.axial_interface.is_axis_in_position():
-                                self.status.state = AxisState.READY
-                                self.logger.info(f"{self.axis}: retraction complete.")
-                                return
+                if self.axial_interface.is_axis_in_position():
+                    self._retracted = True
+                    self.status.state = AxisState.READY
+                    self.logger.info(f"{self.axis}: retraction complete.")
+                    return
 
             except (RuntimeError, TimeoutError) as e:
                 self.status.fault = True
                 self.status.state = AxisState.FAULT
-                self.logger.error(f"{self.axis}: Retract-to-zero failed: {e}")
+                self.logger.error(f"{self.axis}: Retract failed: {e}")
 
         # Motion completion
         elif self.status.state == AxisState.MOVING:
@@ -147,17 +158,19 @@ class Axis:
 
     def retract(self):
         """
-         Command a this axis to retract as configured in the axis.json 
-                if retract_to is null it retracts to its retracted_distance 
-                if retract_to is not null it retracts to that position
+        Command this axis to retract: a plain commanded move to
+        self.retracted_position (retracted_distance, or extended_distance
+        if this joint's axis.json sets flip_retraction -- see __init__).
+        Never re-homes or re-seeks a limit switch -- this project only ever
+        homes once, at startup.
         """
         self.status.state = AxisState.RETRACTING
         self._retract_command_issued = False
         self._retracted = False
-        if self.axial_interface.joint.retract_to is not None:
-            self.logger.info(f"{self.axis}: Retracting (moving to configured retract position)")
+        if self.axial_interface.joint.flip_retraction:
+            self.logger.info(f"{self.axis}: Retracting to extended_distance (flip_retraction)")
         else:
-            self.logger.info(f"{self.axis}: Retracting to zero (re-seeking negative limit switch)")
+            self.logger.info(f"{self.axis}: Retracting to retracted_distance")
 
     def is_retracted(self):
         """

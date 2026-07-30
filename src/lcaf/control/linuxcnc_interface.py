@@ -86,21 +86,17 @@ class LinuxCNCMachineInterface:
     def ensure_manual_mode(self):
         """
         Switch the single shared NML command channel to MANUAL task mode
-        and joint (non-teleop) jogging mode, machine-wide. Native
-        homing/retract-to-zero (home_all_command() below,
-        LinuxCNCAxialInterface.start_retract_to_zero()) requires both:
-        command.home(joint) for a directly-numbered joint rejects with
-        "must be in joint mode to home" (NML error, drained by
-        LinuxCNCMachineInterface.get_errors()) without the
-        teleop_enable(0) call -- found during real-hardware testing, after
-        a directly-numbered retract-to-zero home() was rejected even though
-        the exact same MANUAL-mode-only sequence had just successfully run
-        the initial "Home All" (command.home(-1)) moments earlier. MANUAL
-        task mode and joint/teleop mode are independent LinuxCNC state --
-        command.mode() alone does not imply teleop_enable(0), and nothing
-        else in this project ever explicitly returns the machine to joint
-        mode once anything switches it away (e.g. plain MDI motion,
-        typically Cartesian/teleop by convention).
+        and joint (non-teleop) jogging mode, machine-wide, before issuing
+        the native "Home All" (home_all_command() below): command.home(-1)
+        rejects with "must be in joint mode to home" (NML error, drained by
+        LinuxCNCMachineInterface.get_errors()) without the teleop_enable(0)
+        call. MANUAL task mode and joint/teleop mode are independent
+        LinuxCNC state -- command.mode() alone does not imply
+        teleop_enable(0), and nothing else in this project ever explicitly
+        returns the machine to joint mode once anything switches it away
+        (e.g. plain MDI motion, typically Cartesian/teleop by convention).
+        This project homes exactly once per process, at startup -- there is
+        no other command.home() call anywhere else.
         """
         self.command.mode(linuxcnc.MODE_MANUAL)
         self.command.teleop_enable(0)
@@ -184,15 +180,6 @@ class LinuxCNCAxialInterface:
         self._homing_phase: str | None = None
         self._homing_start_time: float = 0.0
         self._homing_timeout: float = 60.0
-
-        # Retract-to-zero phase state -- see start_retract_to_zero()/
-        # poll_retract_to_zero() below. Separate from _homing_phase (and
-        # never touches axis_homed/min_limit/max_limit the way initial
-        # homing does) since MotionCoordinator runs this repeatedly, once
-        # per retract, for the lifetime of the session -- not just once at
-        # startup.
-        self._retract_phase: str | None = None
-        self._retract_start_time: float = 0.0
 
     # Status update
     def poll(self):
@@ -406,33 +393,6 @@ class LinuxCNCAxialInterface:
     def is_homing_in_progress(self) -> bool:
         return self._homing_phase is not None
 
-    # Retract-to-zero -- re-seek the negative limit switch before every
-    # retract move (see MotionCoordinator/Axis.retract_to_zero()), not just
-    # once at process start. These joints are open-loop steppers with no
-    # position feedback (docs/potential_issues.md): the commanded "0.0"
-    # position can silently drift from true mechanical zero as steps are
-    # missed over a session, so re-referencing to the physical switch on
-    # every retract -- instead of trusting the accumulated commanded
-    # position -- is the only way this project can catch that drift.
-    #
-    # joint.retract_to (this project's Y, set to 1.5) is the one exception:
-    # its "retract" is a plain move to that configured position instead,
-    # with no switch to re-reference against -- see start_retract_to_zero().
-    #
-    # Deliberately separate from _homing_phase/begin_homing_wait/poll_homing:
-    # this never touches axis_homed, min_limit, or max_limit (a
-    # dual_limit_switches joint's measured travel from initial homing must
-    # survive every later retract unchanged), and it requires initial
-    # homing to have already completed once. Unlike initial homing (one
-    # shared command.home(-1) covering every joint, see
-    # LinuxCNCMachineInterface.home_all_command()), this issues its own
-    # directly-numbered command.home(joint) for just this one joint, since
-    # only this joint is retracting at that point in a toolpath operation.
-    def is_retract_in_progress(self) -> bool:
-        return self._retract_phase is not None
-
-    
-
     def _set_homed_limits(self):
         """
         Set min_limit/max_limit once LinuxCNC's own native homing reports
@@ -506,8 +466,9 @@ class LinuxCNCAxialInterface:
         self.execute_mdi(mdi)
 
     # A sibling axis's own real position is most often *exactly* its
-    # retracted_distance right after a home/retract, which is also exactly
-    # its own MIN_LIMIT -- restating that value in a G-code word round-trips
+    # retracted_distance (or extended_distance, for a flip_retraction joint)
+    # right after a home/retract, which is also exactly its own MIN_LIMIT
+    # (or MAX_LIMIT) -- restating that value in a G-code word round-trips
     # it through this project's own native-inches-to-mm-string conversion
     # and then LinuxCNC's own mm-to-native conversion, and real-hardware
     # testing found that round-trip alone can land a hair below MIN_LIMIT

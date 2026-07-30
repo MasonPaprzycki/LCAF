@@ -63,12 +63,12 @@ Responsibilities:
 
 # motion_coordinator.py
     - Within every tool path we need to retract Z, retract X and Y, apply the rotation A, apply X and Y, and finally apply Z. MotionCoordinator makes sure we do this 
-    - Retracting an axis means re-seeking that axis's own negative limit switch and re-zeroing from it (Axis.retract_to_zero()), not just commanding a move back to a remembered "0.0" -- these are open-loop stepper joints with no position feedback, so re-referencing to the physical switch on every retract catches drift a plain commanded move would silently carry forward. See docs/hardware_setup.md section 7 ("Retract-to-zero").
+    - Retracting an axis (Axis.retract()) is a plain commanded move to that joint's own configured retract position (retracted_distance, or extended_distance if axis.json sets flip_retraction) -- mechanically identical to Axis.move(), never a re-home or a limit-switch re-seek. This project homes exactly once, at startup. See docs/hardware_setup.md section 7 ("Retract").
 
 Responsibilities: 
     - Coordinating multi-axis moves
-    - Homing
-    - Retract-to-zero before every operation's lateral/rotational moves
+    - Homing (once, at startup)
+    - Retract to a configured soft limit before every operation's lateral/rotational moves
     - Emergency stop requests
     - Polling axis state
     - Does not perform trajectory generation

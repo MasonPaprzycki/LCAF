@@ -294,40 +294,27 @@ class NativeHomeValueTests(unittest.TestCase):
             )
 
 
-class RetractToValidationTests(unittest.TestCase):
+class FlipRetractionValidationTests(unittest.TestCase):
     """
-    JointConfiguration.retract_to (this project's Y axis, set to 1.5 in
-    configs/axis.json) is the absolute position a joint moves to on
-    retract instead of re-seeking its negative limit switch -- see
-    LinuxCNCAxialInterface.start_retract_to_zero(). When both travel
-    limits are known it must fall within [retracted_distance,
-    extended_distance], the same soft-limited range every other command is
-    held to.
+    JointConfiguration.flip_retraction (this project's Y axis, set True in
+    configs/axis.json) selects which end of this joint's own soft-limit
+    range Axis.retract() targets: extended_distance instead of
+    retracted_distance -- see docs/hardware_setup.md section 7 ("Retract").
+    There is no position to retract to when extended_distance itself isn't
+    configured, so that combination is rejected at construction time.
     """
 
-    def test_retract_to_within_bounds_is_accepted(self):
-        joint = make_joint(retracted_distance=0.25, extended_distance=2.5, retract_to=1.5)
-        self.assertEqual(joint.retract_to, 1.5)
-
-    def test_retract_to_beyond_extended_distance_is_rejected(self):
-        with self.assertRaises(ValueError):
-            make_joint(retracted_distance=0.25, extended_distance=2.5, retract_to=3.0)
-
-    def test_retract_to_beyond_retracted_distance_is_rejected(self):
-        with self.assertRaises(ValueError):
-            make_joint(retracted_distance=0.25, extended_distance=2.5, retract_to=-1.0)
-
-    def test_retract_to_defaults_to_none(self):
+    def test_flip_retraction_defaults_to_false(self):
         joint = make_joint()
-        self.assertIsNone(joint.retract_to)
+        self.assertFalse(joint.flip_retraction)
 
-    def test_retract_to_unbounded_when_distances_are_null(self):
-        # No range check possible without configured bounds -- any value is
-        # accepted (with the usual retracted_distance/extended_distance-null
-        # warnings, not a retract_to-specific one).
-        with self.assertLogs("lcaf.utils.joint_configuration", level="WARNING"):
-            joint = make_joint(retracted_distance=None, extended_distance=None, retract_to=1000.0)
-        self.assertEqual(joint.retract_to, 1000.0)
+    def test_flip_retraction_true_is_accepted_with_extended_distance_set(self):
+        joint = make_joint(retracted_distance=0.25, extended_distance=2.5, flip_retraction=True)
+        self.assertTrue(joint.flip_retraction)
+
+    def test_flip_retraction_true_without_extended_distance_is_rejected(self):
+        with self.assertRaises(ValueError):
+            make_joint(extended_distance=None, flip_retraction=True)
 
 
 if __name__ == "__main__":

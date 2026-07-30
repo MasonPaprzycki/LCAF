@@ -173,28 +173,25 @@ class JointConfiguration:
     or two fake limit switches.
     """
 
-    retract_to: float | None = None
+    flip_retraction: bool = False
     """
-    Absolute position (in this joint's own native unit -- inches or
-    degrees -- measured from its own zero, the same frame as
-    retracted_distance/extended_distance) that this joint should move to
-    on "retract" instead of re-seeking its negative limit switch. This
-    project's Y axis is mechanically arranged so its retracted position is
-    partway into its positive-direction travel rather than at zero, so it
-    is the one joint with this set (to 1.5 -- not all the way to its own
-    extended_distance soft limit). Read by LinuxCNCAxialInterface.
-    start_retract_to_zero()/poll_retract_to_zero(): instead of re-seeking
-    the negative limit switch (the normal retract, which also
-    re-references position_offset_to_native against physical drift), it
-    commands a plain move to retract_to in the coordinate frame already
-    established by the last full home_all() -- there is no limit switch at
-    this position to re-seek against, so nothing here corrects for drift
-    the way the negative-switch retract does.
+    Which end of this joint's own soft-limit range (see
+    retracted_distance/extended_distance below) it moves to on "retract".
+    False (default): retracted_distance, the near/standoff end. True:
+    extended_distance, the far end -- this project's Y axis is
+    mechanically arranged so its retracted position is at the far
+    (positive-direction) end of its travel rather than the near one, so it
+    is the one joint with this set.
 
-    None (default) for every other joint -- retract behaves as always,
-    re-seeking the negative limit switch. When set, must fall within
-    [retracted_distance, extended_distance] if those are configured (see
-    __post_init__).
+    Read by Axis.__init__ to pick this joint's own retracted_position.
+    Retracting is always a plain commanded move to that position -- this
+    project only ever homes once, at startup (ForgeBrain.INITIALIZING ->
+    MotionCoordinator.home_all()); it never re-seeks a limit switch again
+    afterward, so there is nothing here to re-reference against physical
+    drift the way the one-time home_all() does.
+
+    True requires extended_distance to be configured (see __post_init__) --
+    there is otherwise no position to retract to.
     """
 
     # Signal polarity. `inverted` is the one supported software fix for a
@@ -349,17 +346,12 @@ class JointConfiguration:
                 "switch or mechanical stop protects this end of travel now."
             )
 
-        if self.retract_to is not None:
-            if self.retracted_distance is not None and self.retract_to < self.retracted_distance:
-                raise ValueError(
-                    f"Joint {self.joint} ({self.axis}): retract_to ({self.retract_to}) is beyond "
-                    f"this joint's retracted-direction soft limit ({self.retracted_distance})."
-                )
-            if self.extended_distance is not None and self.retract_to > self.extended_distance:
-                raise ValueError(
-                    f"Joint {self.joint} ({self.axis}): retract_to ({self.retract_to}) is beyond "
-                    f"this joint's extended-direction soft limit ({self.extended_distance})."
-                )
+        if self.flip_retraction and self.extended_distance is None:
+            raise ValueError(
+                f"Joint {self.joint} ({self.axis}): flip_retraction=True requires "
+                "extended_distance to be configured -- there is no soft limit to retract to "
+                "otherwise."
+            )
 
         if (
             self.negative_limit_input is not None

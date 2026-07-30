@@ -13,12 +13,14 @@ from lcaf.utils.toolpath import OperationType, ToolpathOperation
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-class RetractStatesUseRetractToZeroTests(unittest.TestCase):
+class RetractStatesUsePlainMovesTests(unittest.TestCase):
     """
-    MotionCoordinator's RETRACT_Z/RETRACT_Y/RETRACT_X states must re-seek
-    each axis's own negative limit switch (Axis.retract_to_zero()) instead
-    of commanding a plain move to a remembered "0.0" -- see
-    docs/hardware_setup.md section 7 ("Retract-to-zero") and
+    MotionCoordinator's RETRACT_Z/RETRACT_Y/RETRACT_X states command a
+    plain move to each axis's configured retract position
+    (retracted_distance, or extended_distance if that joint's axis.json
+    sets flip_retraction) -- never a re-home or a limit-switch re-seek.
+    This project homes exactly once, at startup. See
+    docs/hardware_setup.md section 7 ("Retract") and
     docs/state_machine.md's RETRACT_Z/RETRACT_XY definitions.
     """
 
@@ -34,9 +36,9 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
         self.stat = self.fake_linuxcnc._last_stat
 
         # Simulate every switched axis having already completed initial
-        # homing this session -- retract_to_zero() only requires that flag,
-        # not a full re-derivation of the native-homing sequence (already
-        # covered by test_linuxcnc_interface.py).
+        # homing this session -- retract() only requires that flag, not a
+        # full re-derivation of the native-homing sequence (already covered
+        # by test_linuxcnc_interface.py).
         for axis in self.motion.axes.values():
             axis.axial_interface.axis_homed = True
 
@@ -45,16 +47,12 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
 
     def advance_retract(self, axis_name: str):
         """Drive one axis's RETRACTING state to completion via its own
-        poll() (native retract-to-zero re-runs command.home() -- see
-        LinuxCNCAxialInterface.start_retract_to_zero()). LinuxCNC's own
-        final move-to-HOME (generate_ini() sets HOME=retracted_distance)
-        already backs the joint off its switch before ever reporting
-        homed=True, so setting the fake stat's 'homed' flag alone is
-        enough -- no separate backoff step to drive here."""
-        joint_num = self.motion.axes[axis_name].joint
-        self.motion.axes[axis_name].poll()  # issues command.home() for retract
-        self.stat.joint[joint_num]["homed"] = True
-        self.motion.axes[axis_name].poll()  # observes homed -> retract complete
+        poll(). The fake's own joint status defaults inpos=True (see
+        fake_linuxcnc.FakeStat) -- the first poll() issues the plain
+        commanded move (Axis.retract()) and the second observes it already
+        reporting in-position."""
+        self.motion.axes[axis_name].poll()  # issues the move
+        self.motion.axes[axis_name].poll()  # observes in-position -> retract complete
 
     def start_operation(self) -> ToolpathOperation:
         operation = ToolpathOperation(
@@ -77,7 +75,7 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
         self.assertEqual(self.motion.axes["z"].status.state, AxisState.RETRACTING)
         self.assertEqual(self.motion.state, MotionCoordinatorState.VERIFY_Z_RETRACTED)
 
-    def test_verify_retracted_waits_for_the_switch_before_advancing(self):
+    def test_verify_retracted_waits_for_the_move_before_advancing(self):
         self.start_operation()
         self.motion.update()
 
@@ -104,9 +102,8 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
 
     def test_retract_before_initial_homing_faults_instead_of_moving(self):
         # Undo the setUp shortcut -- a fresh joint that never homed this
-        # session must refuse retract-to-zero (LinuxCNCAxialInterface.
-        # start_retract_to_zero()), surfacing as a motion fault rather than
-        # silently moving.
+        # session must refuse to retract, surfacing as a motion fault
+        # rather than silently moving.
         self.motion.axes["z"].axial_interface.axis_homed = False
         self.start_operation()
 
@@ -114,6 +111,14 @@ class RetractStatesUseRetractToZeroTests(unittest.TestCase):
         self.motion.axes["z"].poll()
 
         self.assertEqual(self.motion.axes["z"].status.state, AxisState.FAULT)
+
+    def test_y_axis_retracts_to_extended_distance_per_real_config(self):
+        # configs/axis.json sets flip_retraction=true for Y (mechanically
+        # retracted at the far end of its travel, not the near one) -- see
+        # docs/hardware_setup.md section 7.
+        y_joint = self.machine_config.joint_by_axis("Y")
+        self.assertTrue(y_joint.flip_retraction)
+        self.assertEqual(self.motion.axes["y"].retracted_position, y_joint.extended_distance)
 
 
 class MultiAxisMdiWordTests(unittest.TestCase):

@@ -319,10 +319,10 @@ class MotionCoordinator:
 
     def retract_axis(self, axis: str):
         """
-        Command a single axis to retract (Axis.retract()) 
-        As configured in its axis.json 
-        if retract_to is null it retracts to its retracted_distance 
-        if retract_to is not null it retracts to that position
+        Command a single axis to retract (Axis.retract()) to its configured
+        retract position -- retracted_distance, or extended_distance if
+        this joint's axis.json sets flip_retraction. Always a plain
+        commanded move; this project only ever homes once, at startup.
         """
 
         if axis not in self.axes:

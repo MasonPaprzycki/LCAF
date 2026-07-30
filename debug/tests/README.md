@@ -62,35 +62,36 @@ here on its own.
   `status.joint[n]['min_hard_limit']`/`['max_hard_limit']` as a signal
   distinct from `is_faulted()`, and a `dual_limit_switches=False` joint's
   homing (still just trusts configured `extended_distance`, same as the
-  dual-switch case). `RetractToZeroTests` covers
-  `start_retract_to_zero()`/`poll_retract_to_zero()`: refuses to run before
-  initial homing or on a switchless joint, reruns native `command.home(joint)`
-  for that one joint specifically (unlike initial homing, retract-to-zero
-  still addresses a single joint by number, not `-1`, since only that one
-  joint is retracting at that point), and never remeasures `max_limit`.
-  `RetractToTests` covers the `retract_to` exception (this project's Y, set
-  to `1.5`): retract instead commands a plain MDI move to `retract_to`,
-  completes on `inpos` rather than a re-home, and never touches
-  `position_offset_to_native`/`max_limit`. See
+  dual-switch case). See
   [docs/hardware_setup.md](../../docs/hardware_setup.md) sections 5 and 7
-  for the behavior this is pinning down, and why it matters.
+  for the behavior this is pinning down, and why it matters. Retracting is
+  covered instead in `test_axis.py`/`test_motion_coordinator.py` below --
+  it's a plain `Axis.move()`-equivalent command, not a distinct method on
+  `LinuxCNCAxialInterface`.
 
 - **`test_axis.py`** -- `Axis.poll()`: that a hard-limit-switch trip
   outside of homing moves the axis to `FAULT` (via `is_on_hard_limit()`),
   that the same condition is *not* treated as a fault while that axis's
-  own state is `HOMING` or `RETRACTING` (driving onto the switch it's
-  searching for is expected there), and that this didn't change the
-  pre-existing following-error fault behavior (`is_faulted()`). Also covers
-  `retract_to_zero()`/`is_retracted()`: completes once the negative switch
-  trips, and resets on the next retract call.
+  own state is `HOMING` (driving onto the switch it's searching for is
+  expected there), and that this didn't change the pre-existing
+  following-error fault behavior (`is_faulted()`). Also covers
+  `retract()`/`is_retracted()`: a plain commanded move to
+  `retracted_position` (never a re-home), which completes once the joint
+  reports in-position, faults on a hard-limit trip or if the axis hasn't
+  been homed yet (unlike `HOMING`, a limit trip during `RETRACTING` is now
+  a genuine fault), and resets `is_retracted()` on the next retract call.
+  `FlipRetractionTests` covers `JointConfiguration.flip_retraction` (this
+  project's Y): retract instead targets `extended_distance`.
 
 - **`test_motion_coordinator.py`** -- `MotionCoordinator`'s
   `RETRACT_Z`/`RETRACT_Y`/`RETRACT_X` states: that each one drives the
   matching `Axis` into `RETRACTING` (not `MOVING`) via `retract_axis()`,
   that `VERIFY_*_RETRACTED` waits for `Axis.is_retracted()` before
-  advancing, that the full Z->Y->X sequence reaches `ROTATE_A`, and that a
+  advancing, that the full Z->Y->X sequence reaches `ROTATE_A`, that a
   joint which never completed initial homing surfaces as a motion fault
-  instead of silently moving. `ConcurrentHomingTests` covers `home_all()`:
+  instead of silently moving, and that Y (the real `configs/axis.json`'s
+  one `flip_retraction` joint) retracts to its `extended_distance`.
+  `ConcurrentHomingTests` covers `home_all()`:
   issues exactly one native "Home All" (`command.home(-1)`), not a
   per-joint call, every axis starts watching its own
   `status.joint[n]['homed']` within the same heartbeat (not one at a time,
