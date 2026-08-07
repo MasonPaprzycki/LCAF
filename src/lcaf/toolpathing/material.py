@@ -1,21 +1,26 @@
 """Approximate, practical material models for the toolpath slicer.
 
 Nothing here is a material simulation or a sourced alloy datasheet. Every
-constant is a deliberately rough, order-of-magnitude engineering estimate
-chosen for two narrow purposes:
-
-1. Give ``material`` and ``target_temperature_c`` a real, felt effect on the
-   still purely computational-geometry deformation preview in
-   ``visualization.py`` -- via ``formability`` (see ``formability_response``
-   below), not via any constitutive/FEM model.
-2. Provide a separate, practical slab-method force estimate
-   (``estimate_operation_force_kn``) for planning purposes.
+constant is a deliberately rough, order-of-magnitude engineering estimate,
+used for a separate, practical slab-method force estimate
+(``estimate_operation_force_kn``) for planning purposes.
 
 Numbers here never feed back into the planned strike coordinates (x/y/
-die_gap/rotation) themselves, and the force estimate never feeds back into
-the deformation preview -- both consume the same material/temperature
-inputs independently. Dies are treated as rigid and able to supply whatever
-force the estimate says they need.
+die_gap/rotation) themselves. Dies are treated as rigid and able to supply
+whatever force the estimate says they need.
+
+Historical note: ``formability``/``formability_response`` used to also
+drive ``visualization.py``'s deformation preview (a purely
+computational-geometry bulge heuristic, gated by how "formable" the chosen
+material/temperature was). That preview is now driven by a trained neural
+surrogate instead (see ``lcaf.simulation.surrogate`` and
+``docs/surrogate_deformation_model.md``), which takes only geometric process
+parameters as input -- a given checkpoint is trained for one material/
+temperature combination, so this module's ``material``/``target_temperature_c``
+no longer have any effect on the animated preview, only on the force/
+pressure estimate below. ``formability_response`` is kept as a still-valid,
+tested, currently-unused mapping in case a future material-conditioned
+surrogate or a force-based UI hint wants it again.
 """
 
 from __future__ import annotations
@@ -153,24 +158,29 @@ def resolve_material_band(material: str, temperature_c: float) -> MaterialBand:
 
 @dataclass(frozen=True)
 class FormabilityResponse:
-    """The two dimensionless scalars the deformation mechanics consume."""
+    """The two dimensionless scalars the old geometric deformation preview
+    consumed. See the module docstring: no longer wired into
+    ``visualization.py`` (the surrogate-driven preview does not take
+    material/temperature as input), kept as a still-valid mapping.
+    """
 
     reach_scale: float
     closure_fraction: float
 
 
 def formability_response(formability: float) -> FormabilityResponse:
-    """Map a 0..1 formability into the deformation mechanics' two knobs.
+    """Map a 0..1 formability into the old geometric preview's two knobs.
 
-    ``reach_scale`` (0.4..1.0) scales how far displaced material bulges out
-    from a die's rigid edge: cold/stiff material bulges tightly against the
-    die, hot/soft material spreads much further before fading out.
-    ``closure_fraction`` (0.15..1.0) scales how much of one strike's own
-    exact volume-conserving redistribution is actually applied immediately,
+    ``reach_scale`` (0.4..1.0) scaled how far displaced material bulged out
+    from a die's rigid edge: cold/stiff material bulged tightly against the
+    die, hot/soft material spread much further before fading out.
+    ``closure_fraction`` (0.15..1.0) scaled how much of one strike's own
+    exact volume-conserving redistribution was actually applied immediately,
     versus left for a later strike/cycle to keep closing -- cold, stiff
-    material takes many more hits to fully spread and settle onto the
+    material took many more hits to fully spread and settle onto the
     target, exactly like real forging practice; hot, soft material nearly
-    fully relaxes in one hit.
+    fully relaxed in one hit. See ``FormabilityResponse``'s docstring: not
+    currently consumed by anything.
     """
     formability = max(0.0, min(1.0, formability))
     return FormabilityResponse(
@@ -221,7 +231,7 @@ def estimate_strike_force_kn(
     flat-die forging force estimate (the friction-hill correction to a
     plane-strain slab analysis; see any metal-forming text, e.g. Kalpakjian &
     Schmid). It is a hand-calculation-grade estimate, not a simulation, and
-    is entirely separate from the geometric deformation preview: it never
+    is entirely separate from the deformation preview: it never
     feeds back into planned strike coordinates or the animated shape, and
     dies are treated as rigid and able to supply whatever force it says they
     need.

@@ -15,6 +15,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Sequence
 
+from lcaf.simulation.surrogate.inference import SurrogateNetwork
+
 from .material import MATERIAL_LABELS, MATERIALS, plan_force_report
 from .toolpath_slicer import (
     MachineLimits,
@@ -82,6 +84,7 @@ class ForgePreview(ttk.Frame):
         self.motion_progress = 0.0
         self.mesh_quality = 48
         self.show_dies = True
+        self.network: SurrogateNetwork | None = None
         self._pre_stroke_state: tuple | None = None
         self.canvas.bind("<Configure>", lambda _event: self.redraw())
         self.redraw()
@@ -92,6 +95,10 @@ class ForgePreview(ttk.Frame):
 
     def set_show_dies(self, show: bool) -> None:
         self.show_dies = show
+        self.redraw()
+
+    def set_network(self, network: SurrogateNetwork | None) -> None:
+        self.network = network
         self.redraw()
 
     def show_plan(self, plan: ToolpathPlan, settings: SliceSettings) -> None:
@@ -205,8 +212,11 @@ class ForgePreview(ttk.Frame):
         if self.plan is None or not self.plan.sections:
             canvas.create_text(width / 2, height / 2, text="Load a watertight OBJ or STL, then generate a preview.", fill="#8fa3c0", font=("Segoe UI", 12))
             return
-        state = material_state(self.plan, self.operation_index, self.motion_progress, radial_segments=self.mesh_quality)
-        self._pre_stroke_state = material_state(self.plan, self.operation_index, 0.0, radial_segments=self.mesh_quality)
+        if self.network is None:
+            canvas.create_text(width / 2, height / 2, text="Select a surrogate model checkpoint (section 4), then generate a preview.", fill="#8fa3c0", font=("Segoe UI", 12))
+            return
+        state = material_state(self.plan, self.operation_index, self.motion_progress, self.network, radial_segments=self.mesh_quality)
+        self._pre_stroke_state = material_state(self.plan, self.operation_index, 0.0, self.network, radial_segments=self.mesh_quality)
         self._draw_cross_section(20, 40, split - 40, height - 60, state)
         self._draw_axial_plan(split + 20, 40, width - split - 40, height - 60, state)
 
@@ -331,7 +341,7 @@ class ForgePreview(ttk.Frame):
         # axial_trim_allowance_mm's own docstring for the volume balance
         # this comes from.
         axial_extension_mm = axial_trim_allowance_mm(
-            self.plan, self.operation_index, self.motion_progress, radial_segments=self.mesh_quality
+            self.plan, self.operation_index, self.motion_progress, self.network, radial_segments=self.mesh_quality
         )
         free_end_x = sections[-1].x_model_mm
         extension_x = free_end_x + axial_extension_mm
@@ -454,6 +464,7 @@ class Forge3DPreview(ttk.Frame):
         self.zoom = 1.0
         self.mesh_quality = 36
         self.show_dies = True
+        self.network: SurrogateNetwork | None = None
         self._pre_stroke_state: tuple | None = None
         self._drag_origin: tuple[int, int, float, float, float, float, float] | None = None
         self.canvas.bind("<Configure>", lambda _event: self.redraw())
@@ -531,6 +542,10 @@ class Forge3DPreview(ttk.Frame):
         self.show_dies = show
         self.redraw()
 
+    def set_network(self, network: SurrogateNetwork | None) -> None:
+        self.network = network
+        self.redraw()
+
     def show_plan(self, plan: ToolpathPlan, settings: SliceSettings) -> None:
         self.plan = plan
         self.stock_radius = settings.stock_radius_mm
@@ -556,11 +571,14 @@ class Forge3DPreview(ttk.Frame):
         if self.plan is None or not self.plan.sections:
             canvas.create_text(width / 2, height / 2, text="Generate a plan, then switch here to watch the 3D envelope evolve.", fill="#8fa3c0", font=("Segoe UI", 12))
             return
+        if self.network is None:
+            canvas.create_text(width / 2, height / 2, text="Select a surrogate model checkpoint (section 4), then generate a preview.", fill="#8fa3c0", font=("Segoe UI", 12))
+            return
 
         sections = self.plan.sections
         segment_count = self.mesh_quality
-        material_rings = material_state(self.plan, self.operation_index, self.motion_progress, radial_segments=segment_count)
-        self._pre_stroke_state = material_state(self.plan, self.operation_index, 0.0, radial_segments=segment_count)
+        material_rings = material_state(self.plan, self.operation_index, self.motion_progress, self.network, radial_segments=segment_count)
+        self._pre_stroke_state = material_state(self.plan, self.operation_index, 0.0, self.network, radial_segments=segment_count)
         target_rings = [
             radial_resample(section.polygon_yz_mm, radial_segments=segment_count)
             for section in sections
@@ -571,7 +589,7 @@ class Forge3DPreview(ttk.Frame):
         # axial_trim_allowance_mm's own docstring for the volume balance
         # this comes from.
         axial_extension_mm = axial_trim_allowance_mm(
-            self.plan, self.operation_index, self.motion_progress, radial_segments=segment_count
+            self.plan, self.operation_index, self.motion_progress, self.network, radial_segments=segment_count
         )
         free_end_x = sections[-1].x_model_mm
         extension_x = free_end_x + axial_extension_mm
@@ -1146,6 +1164,11 @@ class ToolpathApp(tk.Tk):
         self.die_width = tk.StringVar(value="")
         self.die_corner_radius = tk.StringVar(value="0")
         self.upper_die_radius = tk.StringVar(value="")
+        self.surrogate_checkpoints = self._surrogate_checkpoint_paths()
+        self.surrogate_checkpoint_choice = tk.StringVar(value="")
+        self.surrogate_checkpoint_path = tk.StringVar(value="")
+        self.surrogate_status = tk.StringVar(value="No surrogate model selected — required to generate a preview.")
+        self.surrogate_network: SurrogateNetwork | None = None
         self.example_target = tk.StringVar(value="")
         self.playback_speed = tk.DoubleVar(value=1.0)
         self.mesh_quality = tk.IntVar(value=48)
@@ -1179,6 +1202,21 @@ class ToolpathApp(tk.Tk):
             ("Tapered hex bar — R5 → R8 → R5 mm", "tapered_hex_bar.obj"),
         )
         return {label: examples / filename for label, filename in names if (examples / filename).exists()}
+
+    @staticmethod
+    def _surrogate_checkpoint_paths() -> dict[str, Path]:
+        """Every ``.npz`` checkpoint already present in
+        ``lcaf/simulation/surrogate/trained_network_parameters/``, keyed by
+        filename, for the quick-pick combobox -- mirrors ``_example_paths``'
+        own discovery pattern. ``_choose_surrogate_checkpoint`` (the "Browse…"
+        button) can still point at any ``.npz`` outside this directory.
+        """
+        checkpoint_dir = (
+            Path(__file__).resolve().parents[1] / "simulation" / "surrogate" / "trained_network_parameters"
+        )
+        if not checkpoint_dir.is_dir():
+            return {}
+        return {path.name: path for path in sorted(checkpoint_dir.glob("*.npz"))}
 
     def _build_layout(self) -> None:
         style = ttk.Style(self)
@@ -1330,10 +1368,10 @@ class ToolpathApp(tk.Tk):
         ttk.Label(
             parameters,
             text=(
-                "Material and target temperature together drive how convincingly the preview's "
-                "deformation bulges/settles (cold, stiff material spreads less and needs more "
-                "strikes/cycles to fully converge) and the separate force estimate on its own "
-                "tab -- never the planned strike coordinates themselves."
+                "Material and target temperature drive the separate force/pressure estimate on "
+                "its own tab only -- never the planned strike coordinates, and (since a surrogate "
+                "checkpoint is trained for one material/temperature combination) not the "
+                "deformation preview either -- see section 4."
             ),
             foreground="#9fb0c9",
             wraplength=1040,
@@ -1423,13 +1461,46 @@ class ToolpathApp(tk.Tk):
         ).grid(row=3, column=1, columnspan=2, sticky="w", padx=6, pady=4)
         self._on_die_shape_changed()
 
+        surrogate_box = ttk.LabelFrame(
+            shell, text="4. Surrogate deformation model (required for preview)", padding=10
+        )
+        surrogate_box.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            surrogate_box,
+            text=(
+                "The animated preview is driven entirely by a trained neural network -- a "
+                "feed-forward surrogate following Jagtap, Reinisch & Bailly (ESAFORM 2024, "
+                "DOI 10.21741/9781644903131-253), generalised to 3D (see "
+                "docs/surrogate_deformation_model.md). Choose a trained checkpoint (.npz) below; "
+                "there is no geometric fallback, so a checkpoint must be selected before "
+                "generating a preview. Material/target temperature above no longer affect the "
+                "preview -- a checkpoint is trained for one material/temperature combination."
+            ),
+            foreground="#9fb0c9",
+            wraplength=1040,
+        ).pack(fill="x", pady=(0, 6))
+        surrogate_row = ttk.Frame(surrogate_box)
+        surrogate_row.pack(fill="x")
+        ttk.Label(surrogate_row, text="Checkpoint").pack(side="left", padx=(0, 6))
+        self.surrogate_picker = ttk.Combobox(
+            surrogate_row,
+            textvariable=self.surrogate_checkpoint_choice,
+            values=tuple(self.surrogate_checkpoints),
+            state="readonly",
+            width=34,
+        )
+        self.surrogate_picker.pack(side="left")
+        self.surrogate_picker.bind("<<ComboboxSelected>>", self._choose_surrogate_example)
+        ttk.Button(surrogate_row, text="Browse .npz…", command=self._choose_surrogate_checkpoint).pack(side="left", padx=(8, 0))
+        ttk.Label(surrogate_row, textvariable=self.surrogate_status, foreground="#9fb0c9").pack(side="left", padx=(14, 0))
+
         actions = ttk.Frame(shell)
         actions.pack(fill="x", pady=(0, 10))
         ttk.Button(actions, text="Generate preview", command=self._generate).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="Export JSONL", command=self._export).pack(side="left")
         ttk.Label(actions, textvariable=self.status, foreground="#9fb0c9").pack(side="left", padx=18)
 
-        playback = ttk.LabelFrame(shell, text="4. Animated toolpath preview", padding=8)
+        playback = ttk.LabelFrame(shell, text="5. Animated toolpath preview", padding=8)
         playback.pack(fill="x", pady=(0, 10))
         playback_row = ttk.Frame(playback)
         playback_row.pack(fill="x")
@@ -1516,6 +1587,48 @@ class ToolpathApp(tk.Tk):
         self.axis.set("x")
         self.status.set("Example loaded. Generate a preview, then use Play to watch the die-envelope animation.")
 
+    def _choose_surrogate_checkpoint(self) -> None:
+        checkpoint_dir = Path(__file__).resolve().parents[1] / "simulation" / "surrogate" / "trained_network_parameters"
+        filename = filedialog.askopenfilename(
+            title="Choose a trained surrogate checkpoint",
+            initialdir=str(checkpoint_dir) if checkpoint_dir.is_dir() else None,
+            filetypes=(("Surrogate checkpoint", "*.npz"), ("All files", "*.*")),
+        )
+        if filename:
+            self.surrogate_checkpoint_choice.set("")
+            self._load_surrogate_network(Path(filename))
+
+    def _choose_surrogate_example(self, _event: tk.Event | None = None) -> None:
+        path = self.surrogate_checkpoints.get(self.surrogate_checkpoint_choice.get())
+        if path is not None:
+            self._load_surrogate_network(path)
+
+    def _load_surrogate_network(self, path: Path) -> None:
+        try:
+            network = SurrogateNetwork.load(path)
+        except (OSError, ValueError) as error:
+            self.surrogate_network = None
+            self.surrogate_checkpoint_path.set("")
+            self.surrogate_status.set(f"Failed to load {path.name}: {error}")
+            self.preview.set_network(None)
+            self.preview_3d.set_network(None)
+            messagebox.showerror("Could not load surrogate checkpoint", str(error), parent=self)
+            return
+
+        self.surrogate_network = network
+        self.surrogate_checkpoint_path.set(str(path))
+        metadata = network.metadata
+        is_dummy = metadata.get("is_dummy_smoke_test") == "True"
+        description = metadata.get("description", "")
+        status = f"Loaded {path.name}"
+        if description:
+            status += f" ({description})"
+        if is_dummy:
+            status += " -- DUMMY SMOKE-TEST CHECKPOINT, not physically meaningful."
+        self.surrogate_status.set(status)
+        self.preview.set_network(network)
+        self.preview_3d.set_network(network)
+
     def _on_material_changed(self, _event: tk.Event | None = None) -> None:
         label = self.material_label.get()
         key = next((candidate for candidate in MATERIALS if MATERIAL_LABELS[candidate] == label), "steel")
@@ -1581,10 +1694,15 @@ class ToolpathApp(tk.Tk):
             filename = self.model_path.get().strip()
             if not filename:
                 raise ToolpathPlanningError("Choose an OBJ or STL target mesh first.")
+            if self.surrogate_network is None:
+                raise ToolpathPlanningError(
+                    "Choose a surrogate model checkpoint (section 4) before generating a preview -- "
+                    "the deformation preview has no built-in geometric fallback."
+                )
             self.settings = self._current_settings()
             mesh = load_mesh(filename)
             if self.auto_cycles.get():
-                self.plan = find_sufficient_cycles(mesh, self.settings, self.limits)
+                self.plan = find_sufficient_cycles(mesh, self.settings, self.limits, self.surrogate_network)
                 # find_sufficient_cycles ignores settings.cycles and searches its
                 # own -- reflect back whatever it actually converged at.
                 self.settings = dataclasses.replace(
@@ -1611,7 +1729,9 @@ class ToolpathApp(tk.Tk):
             f"Preview ready: {len(self.plan.sections)} radial segments, "
             f"{len(self.plan.rotations_deg)} strikes/segment, {len(self.plan.operations)} strike operations{cycles_note}."
         )
-        final_trim_allowance_mm = axial_trim_allowance_mm(self.plan, len(self.plan.operations) - 1, 1.0)
+        final_trim_allowance_mm = axial_trim_allowance_mm(
+            self.plan, len(self.plan.operations) - 1, 1.0, self.surrogate_network
+        )
         trim_note = (
             f" This stock length still leaves ~{final_trim_allowance_mm:,.1f} mm to saw off the free end once "
             "forging is complete (volume conservation pushes whatever the local bulge cannot reabsorb out that "

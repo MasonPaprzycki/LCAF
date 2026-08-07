@@ -258,21 +258,28 @@ class SliceSettings:
     segment, matching the segment model; an explicit ``die_length_mm`` can
     still narrow or widen the anvil specifically.
 
-    These settings only shape the *preview's* intermediate deformation, not
-    the strike coordinates themselves: the target's final geometry is
-    unaffected by them.
+    None of these settings change the strike coordinates themselves -- the
+    target's final geometry is unaffected by them.
+    ``lcaf.toolpathing.visualization``'s preview is driven by a trained
+    ``lcaf.simulation.surrogate`` network (see
+    ``docs/surrogate_deformation_model.md``), not by these die-footprint
+    settings: the network was trained assuming both dies are wide enough to
+    fully support the workpiece (the paper's own assumption -- see
+    ``lcaf/simulation/surrogate/README.md``), so ``die_width_mm``,
+    ``upper_die_radius_mm``, and ``die_corner_radius_mm`` now only affect the
+    *rendered* die/anvil footprint in the preview, not the predicted
+    deformation itself. ``die_length_mm`` (the axial bite length) is the
+    exception -- it is read directly as the surrogate's own bite-ratio input.
 
     ``material`` (one of ``lcaf.toolpathing.material.MATERIALS`` --
-    currently ``"plasticine"``, ``"aluminum"``, ``"steel"``) together with
-    ``target_temperature_c`` now also drives the *preview's* deformation
-    mechanics: see ``lcaf.toolpathing.material.formability_response`` and
-    ``visualization._apply_strike_3d``. Neither setting changes the planned
-    strike coordinates (x/y/die_gap/rotation) themselves -- only how the
-    intermediate/bulge preview looks and how many strikes/cycles it takes to
-    fully converge. A separate, independent slab-method force estimate
-    (``lcaf.toolpathing.material.estimate_operation_force_kn``) also reads
-    ``material``/``target_temperature_c``, purely for reporting -- it never
-    feeds back into the deformation preview or the planned coordinates.
+    currently ``"plasticine"``, ``"aluminum"``, ``"steel"``) and
+    ``target_temperature_c`` do not affect the preview at all (a given
+    surrogate checkpoint is trained for one material/temperature
+    combination, matching the paper's own scope) -- they only drive the
+    separate, independent slab-method force estimate
+    (``lcaf.toolpathing.material.estimate_operation_force_kn``), for
+    reporting only, never feeding back into the preview or the planned
+    coordinates.
 
     ``stock_clamped_end`` says which end of the target mesh, along its
     resolved longitudinal axis, is held in the clamp: ``"min"`` for the

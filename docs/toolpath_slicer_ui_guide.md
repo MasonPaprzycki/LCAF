@@ -15,15 +15,22 @@ python -m lcaf.toolpathing.ui
 
 ## First animated example
 
-1. In **Example target**, select `Square bar — 10 mm`. The form fills in a
+1. In **4. Surrogate deformation model**, pick a trained checkpoint (`.npz`)
+   -- either from the quick-pick dropdown (auto-populated from
+   `lcaf/simulation/surrogate/trained_network_parameters/`) or **Browse
+   .npz…** for any other file. **This is required**: the animated preview
+   has no built-in geometric fallback, and **Generate preview** refuses to
+   run without a checkpoint selected. See
+   [Choose a surrogate model](#choose-a-surrogate-model) below.
+2. In **Example target**, select `Square bar — 10 mm`. The form fills in a
    10 mm stock radius, X-axis alignment, and a reasonable demonstration
    resolution.
-2. The rotary (A) axis is continuous on this machine, so the four absolute
+3. The rotary (A) axis is continuous on this machine, so the four absolute
    orientations 0/90/180/270 degrees a square requires are always planned;
    there is no rotation limit to bypass.
-3. Select **Generate preview**. The status line reports the radial segments,
+4. Select **Generate preview**. The status line reports the radial segments,
    strikes per segment, and total strike operations.
-4. In **Animated toolpath preview**, select **Play**. The gold die moves --
+5. In **Animated toolpath preview**, select **Play**. The gold die moves --
    only the punch itself animates; the X/A repositioning between strikes is
    instant, matching how the machine actually moves. A bold **Step N of M**
    counter tracks progress; use **Pause**, **Step**, **Restart**, and the
@@ -83,32 +90,25 @@ visible, if you want an unobstructed view of the deformation itself. The same
 slider sets how many radial samples the deformed-geometry preview uses --
 higher values render a smoother deformed surface at some extra redraw cost.
 
-An unconfigured lower-die length keeps every strike's *rigid* effect
-confined to exactly the one segment it targets -- nothing is forced to that
-segment's exact commanded depth in a segment a visible die isn't touching
-unless you explicitly set a `die_length_mm` that reaches further. Its
-*bulge* margin reaches further than that regardless: only "a couple of
-footprint dimensions" back toward the clamp, but much further forward
-toward the free end, fading smoothly with distance -- so a strike visibly,
-gradually nudges every segment between it and the free end, not just its
-immediate neighbour, the same way real material keeps flowing toward the
-unclamped end rather than the clamped one. See
-[Forward propagation](toolpath_slicer.md#forward-propagation) for the
-underlying mechanic.
+How far one strike's own effect reaches -- which neighbouring segments it
+visibly nudges, and by how much -- is now entirely up to the trained
+surrogate checkpoint you selected in **4. Surrogate deformation model**,
+not a rule this UI implements. `die_length_mm` (the lower die's own
+**Contact length, X**) still matters: it is read directly as the strike's
+bite length, one of the three process parameters the network was trained
+on. See [Deformation preview](toolpath_slicer.md#deformation-preview) and
+[docs/surrogate_deformation_model.md](surrogate_deformation_model.md) for
+what the network predicts.
 
 Both tabs also render an **amber trim allowance**: forging conserves volume
-exactly, so whatever the local bulge above cannot reabsorb nearby must
-reappear as extra length at the target's own free end, exactly the way a
-real bar upsets (gets longer) as its cross-section is squeezed down without
-also being cut shorter. Thanks to the same forward propagation, this reads
-as a smooth taper flowing out of the forged material rather than an
-abrupt block glued onto the end. A dashed line marks exactly where the
-target's own defined length ends and this allowance begins -- material a
-saw trims off once forging is complete. Its *total* is a fixed quantity
-set entirely by your stock length and the target's own volume -- forward
-propagation changes how gradually that same total reads visually, not the
-total itself. It grows as strikes progress and settles once the shape has
-converged; see
+exactly, so whatever the surrogate's own local displacement prediction does
+not reabsorb nearby must reappear as extra length at the target's own free
+end, exactly the way a real bar upsets (gets longer) as its cross-section is
+squeezed down without also being cut shorter. A dashed line marks exactly
+where the target's own defined length ends and this allowance begins --
+material a saw trims off once forging is complete. Its *total* is a fixed
+quantity set entirely by your stock length and the target's own volume. It
+grows as strikes progress; see
 [Volume conservation and the trim allowance](toolpath_slicer.md#volume-conservation-and-the-trim-allowance)
 for the underlying volume balance. It is a preview/reporting quantity only:
 it is never written into the exported JSONL and never changes a planned
@@ -167,9 +167,12 @@ chooses its largest bounding-box dimension.
 - **Model scale**: millimetres per OBJ/STL unit; use `25.4` for inch-based
   geometry.
 - **Target temperature (°C)**: fixture metadata recorded on every generated
-  operation, and -- together with **Billet material** below -- now also
-  drives the *preview's* deformation mechanics and a separate force
-  estimate. It never changes the planned strike coordinates themselves.
+  operation, and -- together with **Billet material** below -- drives the
+  separate force/pressure estimate on the **Force estimate** tab. It does
+  not affect the deformation preview (a surrogate checkpoint is trained for
+  one material/temperature combination -- see
+  [Choose a surrogate model](#choose-a-surrogate-model)) or change the
+  planned strike coordinates themselves.
 - **X offset from clamp (mm) / Y tool position**: fixture coordinates used
   directly in the generated controller operations.
 - **Cycles**: how many times the entire radial-segment x strike sweep
@@ -192,17 +195,16 @@ chooses its largest bounding-box dimension.
   `Aluminum 1100 (pure, dead-soft)`, `Aluminum 6061 (structural)`,
   `Aluminum 7075 (aerospace, high-strength)`, `Plasticine -- soft grade`,
   `Plasticine -- hard grade`). Together with **Target temperature**, the
-  chosen grade drives how convincingly the preview's deformation
-  bulges/settles and how many strikes/cycles it takes to fully converge
-  (cold, stiff material spreads less per strike and needs more hits, exactly
-  like real forging) and the separate force/contact-pressure estimate on the
+  chosen grade drives the separate force/contact-pressure estimate on the
   **Force estimate** tab -- see
   [Material and temperature](toolpath_slicer.md#material-and-temperature)
   for the underlying model, including how each named grade's numbers were
   chosen (order-of-magnitude engineering estimates, not sourced alloy
   datasheets). A hint under the picker shows a realistic temperature range
   for the chosen material's family. Neither setting changes the planned
-  strike coordinates or the target's final geometry.
+  strike coordinates, the target's final geometry, or (since a surrogate
+  checkpoint is trained for one material/temperature combination) the
+  deformation preview.
 
 ## Set the die geometry
 
@@ -210,8 +212,7 @@ Two rigid, finite surfaces act on every strike, matching the machine: the
 **lower die** (the anvil, rectangular) and the **upper die** (the striker, a
 flat-faced circular disc). Leaving any field in **3. Die geometry** blank
 does not mean "unconstrained" -- it means a sensible physical default sized
-from the stock geometry, so the preview visibly bulges displaced material
-sideways by default, without configuring anything first.
+from the stock geometry.
 
 - **Die face shape**: `Full rectangular (sharp edge)` (the previous
   behaviour) or `Radiused edge`, which blends the lower die's tangential
@@ -220,57 +221,58 @@ sideways by default, without configuring anything first.
   face. Leave blank for a default sized from the striking segment's own
   width / the stock radius; set a finite value to model a lower die that
   supports further (or less far) along the billet, or only part of its
-  cross-section.
+  cross-section. **Contact length, X** is the one field here that reaches
+  the deformation preview directly: it is read as the strike's own bite
+  length, one of the surrogate's three trained process-parameter inputs
+  (see [Deformation preview](toolpath_slicer.md#deformation-preview)).
 - **Corner radius (mm)**: enabled only for a radiused face; must not exceed
   half of the contact width.
 - **Upper die radius, Z (mm)**: the upper (striking) die's flat-faced
-  circular contact radius. Leave blank to keep it large enough to always
-  fully cover the target at the segment it strikes -- **an explicitly
-  smaller radius is an honest physical trade-off: like a real round punch
-  smaller than a face, it can leave part of that face unstruck, so the
-  "final shape always matches target" guarantee below no longer holds.**
+  circular contact radius.
 
-Within its footprint each die is an impenetrable displacement boundary: the
-lower die holds material at the original stock surface across every segment
-its length reaches, not just the one the strike is nominally "at"; the upper
-die presses material to the commanded strike depth within its own disc,
-rigidly confined to that one segment. Material either footprint displaces is
-not deleted: it relaxes smoothly toward the material immediately adjacent to
-it -- both axially into neighbouring segments and tangentially around
-neighbouring angles -- the way forge-temperature steel spreads out from
-under a die rather than shrinking in volume. That response fades out
-within a couple of footprint dimensions of each die's edge, and is bounded
-so it never overshoots past the target's own boundary in that direction
-(never past a neighbouring segment's own eventual value). Critically, this
-relaxation is a *gradual, continuous* blend each strike, never an instant
-jump: a ray immediately next to a die's edge and a ray just outside its
-influence never differ by more than a smooth taper between them, so the
-preview never shows the sudden faceted "steps" a one-shot snap-to-target
-would produce.
+**Contact width, Y**, **Corner radius**, and **Upper die radius** now only
+affect the *rendered* shape of the dies in the preview, not the predicted
+deformation -- the surrogate network was trained assuming both dies are
+wide enough to fully support the workpiece (the paper's own assumption; see
+[docs/surrogate_deformation_model.md](surrogate_deformation_model.md)'s
+scope section), which is also this machine's own default configuration.
+Setting a deliberately undersized value here is outside the network's
+trained domain and will not visibly restrict the animated deformation the
+way it used to under the old geometric preview.
 
-That bulge is neither the same in every direction nor applied all at once
-regardless of material: each die's own bulge margins are biased by its own
-axial-vs-tangential aspect ratio, so material spreads preferentially in
-whichever direction the die itself is *narrower* (and so less confining)
-in -- a long, narrow anvil favours tangential spread, a short, wide one
-favours axial spread. **Billet material** and **Target temperature**
-additionally scale both how far that bulge reaches and how much of it
-settles per strike, so cold/stiff material genuinely takes more strikes/
-cycles to fully spread onto the target than hot/soft material at the same
-die settings. See
-[Material and temperature](toolpath_slicer.md#material-and-temperature) for
-the full model.
+## Choose a surrogate model
 
-**At the default upper die radius, whatever the lower die is configured to
-do, once enough rotations/cycles have struck, the final shape still
-converges exactly to the target** -- the lower die's own configuration, and
-the chosen material/temperature, only shape how the animation looks and how
-many cycles it takes, never the eventual result. **Complete necessary
-cycles automatically** keeps adding cycles until it does, and reports (as a
-warning) if it still cannot within its own cycle cap -- a cold, stiff
-material/temperature choice can legitimately need many more cycles than a
-hot one for the same die geometry, the same way real forging needs more
-hits for less workable material.
+**4. Surrogate deformation model** picks which trained network drives the
+animated preview -- see
+[docs/surrogate_deformation_model.md](surrogate_deformation_model.md) for
+what it predicts and its own scope/limitations.
+
+- **Checkpoint** (dropdown): every `.npz` file already present in
+  `lcaf/simulation/surrogate/trained_network_parameters/`, auto-discovered
+  each time the UI starts.
+- **Browse .npz…**: pick any other checkpoint file.
+
+Once loaded, the status line next to these controls reports the
+checkpoint's own description and, if it is the repository's committed
+`dummy_smoke_test.npz` fixture, an explicit warning that it is a
+structural test fixture only -- trained on synthetic data, not real FEA
+results, and **not physically meaningful**. There is no real, FEA-trained
+checkpoint shipped with this repository yet; see
+[docs/surrogate_training_guide.md](surrogate_training_guide.md) to generate
+training data and train one.
+
+**Generate preview** refuses to run, with an explanatory error, until a
+checkpoint is selected -- there is no geometric fallback.
+
+Unlike the old geometric preview, **the final shape is no longer
+guaranteed to converge exactly to the target**, at any die configuration:
+a trained network predicts what a real strike actually does, which may
+never reach an arbitrary target. **Complete necessary cycles
+automatically** keeps adding cycles until it does converge (within its own
+tolerance), and reports (as a warning) if it still cannot within its own
+cycle cap -- treat that warning as a signal the plan may be asking for more
+reduction than this die/checkpoint combination can physically achieve, not
+as a bug to work around by raising the cycle cap indefinitely.
 
 Below the geometry fields, a line reports the target's own volume and the
 **recommended stock length**: how long a cylinder of the chosen stock radius
@@ -293,21 +295,20 @@ radius even when its four faces all fit, since only those four discrete
 rotations are actually struck. Correct the setup or fixture (usually a
 larger stock radius) instead of looking for an override.
 
-The current visualisation is a computational-geometry envelope, not a
-forming simulation -- only the exported strike coordinates themselves come
-from an exact geometric construction. The animated bulge, forward taper,
-and trim-allowance stub are a hand-tuned visualization heuristic with no
-plasticity/FEM model behind them; the material/temperature picker and the
-force/contact-pressure estimate make that heuristic and that separate
-hand-calculation more convincing and more granular, not more physically
-real. None of it predicts true material flow, flash, springback, die
-compliance, friction distribution, strain hardening, in-process temperature
-change, or tooling/fixture collisions -- see [Limits of the
-computational-geometry model](toolpath_slicer.md#limits-of-the-computational-geometry-model)
-for the full list. Treat its animation, and the force/pressure numbers, as
-toolpath review and process-planning aids only. Review the JSONL, prove it
-off-material, and use normal ForgeBrain/LinuxCNC safety procedures before
-any physical motion.
+Only the exported strike coordinates themselves come from an exact
+geometric construction -- the animated bulge is a trained neural network's
+prediction (see [docs/surrogate_deformation_model.md](surrogate_deformation_model.md)),
+not a verified physics solve, and the force/contact-pressure estimate is a
+standard hand-calculation, not a simulation either. Neither predicts true
+material flow, flash, springback, die compliance, friction distribution,
+strain hardening, in-process temperature change, or tooling/fixture
+collisions -- see [Limits of the computational-geometry
+model](toolpath_slicer.md#limits-of-the-computational-geometry-model) for
+the full list, including the surrogate's own explicit scope gaps. Treat its
+animation, and the force/pressure numbers, as toolpath review and
+process-planning aids only. Review the JSONL, prove it off-material, and
+use normal ForgeBrain/LinuxCNC safety procedures before any physical
+motion.
 
 ## Export and inspect JSONL
 

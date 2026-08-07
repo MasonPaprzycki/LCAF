@@ -160,30 +160,17 @@ several named grades within each family -- run `python -m lcaf.toolpathing
 
 ## Die geometry
 
-Two rigid, finite surfaces act on every strike in the *preview*, matching
-the machine: the **lower die** (the fixed anvil, rectangular) and the
-**upper die** (the moving striker, a flat-faced circular disc). Leaving any
-of the fields below unset does not mean "unconstrained" -- it means a
-sensible physical default sized from the stock geometry, so the preview
-bulges displaced material sideways by default, without requiring you to
-configure die dimensions first. These settings only shape
-the *preview's* intermediate deformation, never the strike coordinates
-themselves -- the target's final geometry the machine actually cuts is
-unaffected by them.
+Two rigid, finite surfaces are defined for every strike, matching the
+machine: the **lower die** (the fixed anvil, rectangular) and the **upper
+die** (the moving striker, a flat-faced circular disc). Leaving any of the
+fields below unset does not mean "unconstrained" -- it means a sensible
+physical default sized from the stock geometry. These settings never
+change the strike coordinates themselves -- the target's final geometry the
+machine actually cuts is unaffected by them.
 
 - The **upper die** (machine +Z, the real striking die) is a flat-faced
   circular disc. `--upper-die-radius` / `upper_die_radius_mm` sets its
-  radius; left unset, it defaults to `stock_radius_mm`, which is always
-  large enough to fully cover the target at the one segment a strike
-  targets. Its *rigid* contact footprint never reaches a neighbouring
-  segment, regardless of its radius -- widening it changes how far it
-  reaches tangentially, never how far along X. (Its bulge margin, like the
-  lower die's below, can still nudge an adjacent segment toward -- never
-  past -- that segment's own eventual target.) An explicitly smaller radius
-  is an honest physical trade-off: like a real round punch smaller than a
-  face, it can legitimately leave part of that face unstruck -- **the
-  "final shape always matches target exactly" guarantee below requires
-  `upper_die_radius_mm >= stock_radius_mm`.**
+  radius; left unset, it defaults to `stock_radius_mm`.
 - The **lower die** (machine -Z, the real anvil) never moves in real life.
   `--die-width` / `die_width_mm` and `--die-length` / `die_length_mm`
   describe *its* finite face -- the width across the strike/tangential
@@ -193,52 +180,29 @@ unaffected by them.
   its tangential edges into a radius instead of a sharp corner, and cannot
   exceed half of `die_width_mm`.
 
-Within its footprint each die is an impenetrable displacement boundary: the
-lower die holds material at the original stock surface (it never reduces
-anything, only prevents bulging past where the billet already rests) across
-every axial region its length spans and every tangential angle its width
-spans, a genuinely 3D constraint; the upper die presses material down to the
-commanded strike depth within its own disc, rigidly confined to the one
-segment it targets. A `die_length_mm` spanning more than one segment's width
-rigidly holds every segment the lower die reaches, not just the nearest one
--- but never extends the upper die's own rigid single-segment reach, since
-widening the anvil's axial hold must never make the striking disc's rigid
-footprint touch a segment it wasn't asked to.
+**Only `die_length_mm` reaches the deformation preview.** It is read
+directly as the strike's own bite length -- one of the three process
+parameters (`alpha0`/`xb`/`eps_h`) the surrogate network
+(`lcaf.simulation.surrogate`, see
+[docs/surrogate_deformation_model.md](surrogate_deformation_model.md)) was
+trained on. `upper_die_radius_mm`, `die_width_mm`, and
+`die_corner_radius_mm` now only affect the *rendered* shape of the dies in
+the preview -- the network was trained assuming both dies are wide enough
+to fully support the workpiece (matching the paper's own implicit saddle
+assumption, and this machine's own default configuration), so a
+deliberately undersized value here does not visibly restrict the predicted
+deformation the way it did under the old geometric preview, and is outside
+the network's own trained domain (see
+`lcaf.simulation.surrogate.process_params.ProcessParameters.within_trained_domain`).
 
-Material either footprint displaces is not deleted: it relaxes smoothly,
-immediately adjacent to it -- both axially into neighbouring segments and
-tangentially around neighbouring angles -- toward the target's own known
-boundary in that exact direction, the same way forge-temperature steel
-spreads out from under a die rather than shrinking in volume. Tangentially,
-and axially back toward the clamp, that relaxation fades out within a
-couple of footprint dimensions of the die's edge, as before; axially
-*forward* (+X, toward the free end), it reaches much further -- see
-[Forward propagation](#forward-propagation) below -- since the clamp cannot
-move but the free end can, so displaced material has somewhere to actually
-go in that direction. In every direction it is bounded so it never
-overshoots past the target's own boundary in that exact direction (never
-past that segment's own eventual value), and is tied entirely to that die's
-own contact interface: material outside a strike's zone of influence is
-left completely untouched by it. Each ray's move toward target is a smooth,
-gradual blend -- never an instant jump -- so two neighbouring rays never
-differ by more than a smooth taper between them; see
-[Material and temperature](#material-and-temperature) below for exactly how
-much of that blend happens per strike, and how it is no longer isotropic.
-
-At the default `upper_die_radius_mm` (which always fully covers the target
-at the segment it strikes), **the final shape, once enough rotations/cycles
-have struck, still converges exactly to the target's own support envelope,
-regardless of the configured lower-die size** -- the lower die's
-configuration only shapes how the intermediate animation looks, never the
-final result. This is checked directly in the test suite by comparing the
-fully struck geometry against the target at every segment and orientation,
-including a counter-example that deliberately undersizes
-`upper_die_radius_mm` (and narrows the anvil, so its own generous default
-doesn't independently fill in the gap) and confirms the resulting shortfall.
-A cold/stiff material/temperature combination can likewise need more cycles
-than a hot/soft one to fully converge on the *same* die geometry -- see
-below; `--auto-cycles` keeps adding cycles until it does, and warns rather
-than silently giving up if it still has not by `--auto-cycles-max`.
+Unlike the old geometric preview, **there is no guarantee the final shape
+converges exactly onto the target**, at any die configuration or cycle
+count -- a trained network predicts what a real strike actually does, not
+what is needed to hit an arbitrary target. `--auto-cycles` keeps adding
+cycles until the surrogate-predicted geometry does converge (within
+tolerance), and warns rather than silently giving up if it still has not by
+`--auto-cycles-max` -- treat that warning as a signal the plan may ask for
+more than this die/checkpoint combination can physically achieve.
 
 ## Material and temperature
 
@@ -265,38 +229,15 @@ strike than a hard one), not to stand in for real material characterization.
 `lcaf.toolpathing.material.MATERIAL_LABELS` maps each key to a human-readable
 label for the UI's material picker.
 
-`formability` drives two purely geometric knobs in the *preview's*
-deformation mechanics (never the planned strike coordinates):
-
-- **`reach_scale`** (0.4..1.0) -- how far displaced material bulges from a
-  die's rigid edge. Cold/stiff material bulges tightly against the die;
-  hot/soft material spreads much further before fading out.
-- **`closure_fraction`** (0.15..1.0) -- how much of the remaining gap
-  between a ray's current position and its own known target closes this one
-  strike: ``new_radius = radius + weight * closure_fraction * (target_radius
-  - radius)``, where ``weight`` is the raised-cosine bulge profile above.
-  Every material band's ``closure_fraction`` is strictly less than 1, so a
-  single strike can never fully close that gap -- only enough strikes/
-  cycles can, which is what makes cold/stiff material genuinely take more
-  of them to fully settle onto the target, the same way real forging
-  practice needs more hits for less workable material. This bounded,
-  gradual blend (rather than solving one aggregate volume-conserving growth
-  per strike and clamping to target, an earlier version of this module's
-  approach) is also what keeps the preview continuous: no ray can jump
-  straight from untouched to sitting exactly on its final target in a
-  single strike, which previously produced a visibly discontinuous,
-  "triangulated" jump between a die's own affected rays and their
-  unaffected neighbours whenever a strike reduced (rather than grew)
-  material -- the overwhelmingly common case.
-
-Independently of material, each die footprint's own bulge margins are also
-no longer isotropic: they are biased by that footprint's own axial-vs-
-tangential aspect ratio (`_footprint_bias` in `visualization.py`), so
-material spreads preferentially in whichever direction the die itself is
-*narrower* in -- a long, narrow anvil is biased toward tangential spread; a
-short, wide one toward axial spread -- rather than the same symmetric
-distance-based falloff regardless of die shape. A square/symmetric
-footprint reduces exactly to the previous, isotropic margins.
+**`formability` no longer affects the deformation preview.** The preview is
+now driven entirely by a trained neural surrogate (see
+[docs/surrogate_deformation_model.md](surrogate_deformation_model.md)) --
+`lcaf.simulation.surrogate` -- rather than the geometric heuristic this
+section used to describe (a rigid die clip plus a raised-cosine bulge
+gated by `reach_scale`/`closure_fraction`, both derived from `formability`).
+A surrogate checkpoint is trained for one material/temperature combination,
+so `--material`/`--temperature` now only feed the separate force/pressure
+estimate below, never the animated shape.
 
 A completely separate slab-method (friction-hill) estimate -- the standard
 closed-form flat-die forging calculation -- is computed from the same
@@ -328,61 +269,35 @@ figures per operation. The CLI prints the plan's peak estimated force *and*
 peak contact pressure; the UI's **Force estimate** tab plots both across the
 whole plan (see [the UI guide](toolpath_slicer_ui_guide.md)).
 
-## Forward propagation
+## Deformation preview
 
-Every strike's bulge margin is asymmetric along X: it reaches only "a
-couple of footprint dimensions" backward, toward the clamp (unchanged from
-the isotropic behaviour above), but reaches much further forward, toward
-the free end, fading smoothly with distance rather than cutting off
-sharply. The clamp cannot move, so there is nowhere for material to go
-backward; the free end can, so a strike anywhere in the bar visibly,
-gradually nudges every station between it and the free end -- not just its
-immediate neighbours -- the same way real open-die forging progressively
-pushes material toward the unclamped end rather than displaced volume only
-ever showing up as a lump at the very tip.
-
-Concretely, in `visualization._apply_strike_3d`, the forward margin is the
-backward margin scaled by `_FORWARD_REACH_MULTIPLIER` (6x), capped at the
-actual remaining distance from the strike to the free end so the taper's
-own far edge lines up with (rather than needlessly overshooting past) it.
-This is a purely geometric refinement, independent of material -- it
-composes with confinement-weighted anisotropy and material/temperature
-gating exactly as before, and does not change the rigid footprint's own
-reach (still confined to the one segment/length a strike actually targets)
-or the die-contact interface it produces.
-
-This does **not** change the final trim allowance's own total (see below)
--- that is a fixed quantity determined entirely by the stock length and the
-target's own volume, independent of how gradually the intermediate frames
-get there. What it changes is how that same conservation reads visually:
-instead of every station sitting at either exactly its own final target or
-exactly the pristine stock radius until its own dedicated strike suddenly
-arrives, the whole downstream length of the bar shows a smooth, decaying
-gradient of partial bulge that grows as more of the bar is struck --
-material genuinely appears to flow toward, and taper into, the free end's
-trim allowance, rather than the same volume balance being explained only by
-an abrupt stub glued past the target's own length.
+How a strike actually displaces material in the preview -- the affected
+zone around it, how far it reaches along X, whether it grows toward the
+target -- is now entirely up to whichever trained
+`lcaf.simulation.surrogate.inference.SurrogateNetwork` checkpoint is
+selected in the UI (section 4 of the toolpath UI), not a rule this planner
+implements. See [docs/surrogate_deformation_model.md](surrogate_deformation_model.md)
+for what the network predicts and how it plugs into
+`lcaf.toolpathing.visualization`. There is no built-in fallback -- a
+checkpoint must be selected before a preview can be generated at all.
 
 ## Volume conservation and the trim allowance
 
 Forging never creates or deletes material -- unlike machining, nothing is
-cut away. The local bulge described above -- even with the forward
-propagation just described reaching much further than it used to -- is
-still bounded so it never overshoots the target's own boundary anywhere;
-by itself it does not account for every bit of cross-sectional area a
-strike removes. Whatever it does not locally reabsorb has to go somewhere:
-real open-die forging pushes it out the free end (the clamped end cannot
-move), extending the billet's total length beyond the target's own --
-exactly the "upset" a bar undergoes when its cross-section is reduced
-without also being cut shorter, which a shop then saws off once forging is
-complete.
+cut away. Whatever the surrogate's own local displacement prediction does
+not reabsorb near a strike has to go somewhere: real open-die forging
+pushes it out the free end (the clamped end cannot move), extending the
+billet's total length beyond the target's own -- exactly the "upset" a bar
+undergoes when its cross-section is reduced without also being cut
+shorter, which a shop then saws off once forging is complete.
 
 `lcaf.toolpathing.visualization.axial_trim_allowance_mm(plan,
-operation_index, operation_progress, radial_segments=48)` computes that
-length directly from a volume balance -- current total volume (the current,
-deformed cross-section trapezoidally integrated over every station) versus
-the original stock cylinder's volume -- rather than solving for it, so it
-is exactly conserving by construction and continuous in
+operation_index, operation_progress, network, radial_segments=48)` computes
+that length directly from a volume balance -- current total volume (the
+current, deformed cross-section trapezoidally integrated over every
+station, from the surrogate-driven `material_state`) versus the original
+stock cylinder's volume -- rather than modelling axial material flow
+directly, so it is exactly conserving by construction and continuous in
 `operation_progress` (both the reference volume and the current volume use
 the same polygon discretisation and the same station-centre trapezoidal
 convention, so the comparison is apples-to-apples and reads exactly zero
@@ -452,20 +367,21 @@ that distinction should be read literally, not as a hedge. Concretely:
   construction (numerical integration of the target's true cross-section,
   the convex-hull/support-function math in this module) with no free
   parameters and no physical modelling involved.
-- **Everything else -- the animated bulge, the forward-propagation taper,
-  the trim-allowance stub, the die relaxation margins -- is a hand-tuned
-  geometric *visualization heuristic*, not a physics solve.** There is no
-  plasticity model, no FEM/constitutive solve, no strain field, and no
-  actual material being pushed around underneath it. `reach_scale`,
-  `closure_fraction`, `_footprint_bias`, and `_FORWARD_REACH_MULTIPLIER` (see
-  [Material and temperature](#material-and-temperature) and [Forward
-  propagation](#forward-propagation)) are constants chosen so the animation
-  *looks* like real forge-temperature material spreading, converges to the
-  correct final shape, and never jumps discontinuously -- they were not
-  derived from, and are not validated against, any real deformation data.
-  Two different die/segment configurations that look equally plausible in
-  the preview can differ arbitrarily in how a real billet would actually
-  deform between them.
+- **The animated bulge is a trained neural network's prediction, not a
+  closed-form geometric construction.** See
+  [docs/surrogate_deformation_model.md](surrogate_deformation_model.md) for
+  what it is (a from-scratch implementation of Jagtap, Reinisch & Bailly,
+  ESAFORM 2024, generalised to 3D) and its own explicit scope/limitations
+  section -- notably: trained on idealised rectangular billets and
+  full-width dies (a deliberately undersized `die_width_mm`/
+  `upper_die_radius_mm` now only changes the *rendered* die shape, not the
+  predicted deformation), no guarantee of ever converging exactly onto an
+  arbitrary target the way the old geometric heuristic did, and no
+  self-intersection guard. Two different die/segment configurations that
+  look equally plausible in the preview can still differ arbitrarily in how
+  a real billet would actually deform between them -- the network was
+  trained on FEA data for one material/process window, not validated
+  against physical trials on this machine.
 - **The volume-conservation trim allowance
   (`axial_trim_allowance_mm`) is a real, exact volume balance of the
   *displayed* geometry** -- current deformed cross-section vs. original

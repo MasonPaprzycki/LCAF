@@ -1,108 +1,29 @@
-"""Geometric material-state helpers shared by the 2D and 3D slicer previews.
+"""Die-shape rendering helpers and the surrogate-driven material-state preview.
 
-These functions replay the generated die strikes against an evolving material
-state spanning every axial station at once.  They are an envelope
-visualisation only: the billet begins as a circular cylinder and is reshaped,
-strike by strike, by the die that struck it.  No constitutive/thermal model
-is used -- only computational geometry.
+This module renders two things for the 2D/3D slicer preview:
 
-Two rigid surfaces act on every strike, matching the machine: a moving
-(striking) die and a fixed anvil it presses the billet against. Both have a
-real, finite contact footprint by default -- rather than one side being an
-unconstrained infinite plane -- so that material a strike displaces is never
-simply deleted: it relaxes smoothly into the immediately adjacent stations
-(axially) and angles (tangentially), the way forge-temperature steel
-actually spreads out from under a die rather than shrinking.
+1. **Die/anvil shape** (``die_cap``, ``die_contact_profile``,
+   ``disc_contact_profile``, ``disc_rim_profile``, ``anvil_side_support``) --
+   pure geometry describing the *tooling's* footprint, independent of how
+   material actually deforms under it. Unchanged by, and unrelated to, the
+   deformation model below.
+2. **Material state** (``material_state`` and everything built on it) -- the
+   billet's own animated shape as it is struck. This used to be a pure
+   computational-geometry relaxation (a rigid die clip plus a hand-tuned
+   raised-cosine bulge, guaranteed to converge to the target shape but with
+   no connection to how a real strike displaces material). It is now driven
+   entirely by ``lcaf.simulation.surrogate.inference.SurrogateNetwork`` -- a
+   neural network trained on FEA data following Jagtap, Reinisch & Bailly
+   (ESAFORM 2024, DOI 10.21741/9781644903131-253), generalised to 3D. See
+   ``docs/surrogate_deformation_model.md`` for the full method writeup and
+   ``lcaf/simulation/surrogate/README.md`` for the paper citation.
 
-- The **striking die** (the +normal side, machine +Z) is a flat-faced
-  **circular disc** of radius ``upper_die_radius_mm``, confined -- exactly
-  like every previous version of this planner -- to the one station the
-  operation targets: it never reaches a neighbouring station regardless of
-  how large ``upper_die_radius_mm`` is, so widening the *anvil's* own axial
-  reach (``die_length_mm``) can never make the striking die touch a station
-  it wasn't asked to. Its radius instead controls how far it reaches
-  *tangentially* at that one station: a tangential offset beyond
-  ``upper_die_radius_mm`` is simply outside the disc, exactly as a
-  tangential offset beyond the anvil's own half-width is outside it.
-- The **anvil** (the -normal side, machine -Z) never moves. It is the
-  rectangular prism described by ``die_width_mm``/``die_length_mm``
-  (optionally rounded at its tangential edges by ``die_corner_radius_mm``):
-  within that footprint it is an impenetrable displacement boundary holding
-  material at the original stock surface (it never reduces anything, only
-  prevents bulging past where the billet already rests); outside it, the
-  anvil is simply not there.
-
-Bulge growth is a smooth, bounded *relaxation toward the target* -- not a
-volume-conservation solve. Each affected ray moves a fraction of the way
-from wherever it currently sits toward the target's own known boundary in
-that exact direction, whether that means growing (material spilling
-sideways from a narrow die) or shrinking (a neighbouring station easing
-toward its own smaller eventual value ahead of its own dedicated strike):
-
-    new_radius = radius + weight * closure_fraction * (target_radius - radius)
-
-``weight`` is the product of an axial and a tangential raised-cosine
-factor, exactly ``1`` at a die's rigid edge (continuous with the rigid clip
-itself) and fading smoothly to exactly ``0`` a margin's width away -- so it,
-and therefore ``new_radius``, varies continuously with position: no ray can
-jump straight from "completely untouched" to "sitting exactly on its final
-target" the way solving one aggregate volume-conservation growth per strike
-could (and, in an earlier version of this module, did -- concentrating an
-entire strike's displaced volume onto the handful of rays nearest a narrow
-die's edge and, for the overwhelmingly common case of a *reducing* target
-(target below the ray's current radius), snapping them straight to that
-target in a single strike regardless of how small the computed growth was,
-while their immediate neighbours stayed completely unmoved: a visible,
-"triangulated" discontinuity rather than a smooth bulge). ``weight *
-closure_fraction`` is always < 1 for every material this module knows
-about, so a single strike can only ever close *part* of the remaining gap
--- the shape only reaches its target *exactly* in the limit, after enough
-strikes/cycles, never as an intermediate-frame artifact. This also means
-volume is no longer conserved *exactly* per strike, only approximately --
-the deliberate trade for continuity; the die's own rigid, commanded depth
-is completely unaffected either way.
-
-Each footprint's bulge margin -- the raised-cosine taper's own width -- is
-never allowed to shrink below a fraction of ``stock_radius_mm`` (see
-``_MIN_MARGIN_FRACTION``), so it always stays wide enough for the angular/
-axial sampling grid to actually resolve it as a smooth curve rather than a
-handful of samples that alias into a step (the same discontinuity as above,
-from a different cause: too few samples inside an overly-narrow margin).
-Two further, purely geometric refinements make that bulge behave more like
-real forge-temperature material actually spreads, without ever becoming a
-constitutive/FEM model:
-
-- **Confinement-weighted anisotropy.** A die's own footprint is rarely
-  square: a long, narrow anvil confines material strongly along its length
-  but leaves it relatively free tangentially, while a short, wide anvil does
-  the opposite. Each footprint's own axial-vs-tangential bulge margins (see
-  ``_footprint_bias``) are scaled by that footprint's own aspect ratio, so
-  material genuinely spreads preferentially in whichever direction the die
-  itself is smallest -- not by the same symmetric distance-based falloff
-  regardless of die shape. A square/symmetric footprint reduces exactly to
-  the previous, isotropic margins.
-- **Material/temperature-gated response.** ``lcaf.toolpathing.material``
-  resolves ``material``/``target_temperature_c`` (carried on every
-  operation) to a 0..1 ``formability``, which scales ``reach_scale`` (how
-  far the bulge margins reach -- cold/stiff material bulges tightly against
-  the die; hot/soft material spreads much further) and ``closure_fraction``
-  (how much of the remaining gap to target closes per strike, in the
-  relaxation formula above). The die's own rigid, commanded depth always
-  applies in full and immediately -- only the secondary bulge redistribution
-  is gated -- so cold, unworkable material genuinely takes more strikes/
-  cycles to fully spread onto the target, the same way real forging
-  practice needs more hits for less workable material, while the shape
-  still converges exactly given enough cycles (``find_sufficient_cycles``
-  warns rather than silently failing if it does not, within
-  ``max_cycles``).
-
-Because the default ``upper_die_radius_mm`` (``stock_radius_mm``) always
-fully covers the target at the exact station it targets, the final shape
-(after enough strikes/cycles have run) still converges exactly to the
-target's own support envelope at that default, regardless of the configured
-anvil size -- an explicitly undersized ``upper_die_radius_mm`` is an honest
-exception to this: like a real round punch smaller than a face, it can
-legitimately leave parts of that face unstruck.
+Every material-state function below now *requires* a loaded
+``SurrogateNetwork`` -- there is no geometric fallback. Unlike the old
+heuristic, a trained network has no guarantee of converging exactly to an
+arbitrary target shape; ``find_sufficient_cycles`` reflects that honestly
+(it already tolerated non-convergence, returning a best-effort plan with a
+warning rather than raising -- see its own docstring).
 """
 
 from __future__ import annotations
@@ -111,7 +32,8 @@ import dataclasses
 import math
 from typing import Sequence
 
-from .material import formability_response, resolve_material_band
+from lcaf.simulation.surrogate.inference import SurrogateNetwork
+
 from .toolpath_slicer import (
     MachineLimits,
     Point2,
@@ -120,17 +42,6 @@ from .toolpath_slicer import (
     ToolpathSlicer,
     TriangleMesh,
 )
-
-# The minimum width of a bulge margin's raised-cosine taper, as a fraction of
-# stock_radius_mm -- see the module docstring's discussion of why a margin
-# must never be allowed to shrink below what the angular/axial sampling grid
-# can actually resolve as smooth.
-_MIN_MARGIN_FRACTION = 0.12
-
-# How much further a bulge margin reaches toward the free (unclamped) end
-# of the billet than it does toward the clamp, along X -- see the module
-# docstring's discussion of forward-biased propagation.
-_FORWARD_REACH_MULTIPLIER = 6.0
 
 
 def die_cap(
@@ -214,15 +125,6 @@ def disc_rim_profile(
     tangential) plane: a circle of ``radius_mm`` truncated to the strip
     ``|axial| <= half_length_mm``.
 
-    This is the exact shape ``_apply_strike_3d``'s ``disc_half_width_at``
-    already enforces per station -- tangential half-width
-    ``sqrt(max(0, radius_mm**2 - axial**2))``, zero beyond ``radius_mm`` --
-    just expressed as a rim polygon instead of a per-station formula, so a
-    3D renderer can draw the die's real footprint (a circle flattened by two
-    straight chords where it overhangs the segment, never a uniformly
-    shrunk circle that would misrepresent how far it reaches tangentially)
-    instead of approximating it.
-
     Returns the full circle when ``radius_mm <= half_length_mm`` (the disc
     never reaches its own segment boundary).
     """
@@ -280,16 +182,20 @@ def material_state(
     plan: ToolpathPlan,
     operation_index: int,
     operation_progress: float,
+    network: SurrogateNetwork,
     radial_segments: int = 48,
 ) -> tuple[tuple[Point2, ...], ...]:
-    """Return every station's remaining-material ring for one playback instant.
+    """Return every station's current material ring for one playback instant.
 
     ``operation_progress`` is in [0, 1] for the active operation.  Previous
     operations are fully applied, later operations are absent.  Every
-    qualifying strike is replayed in order against a shared station-by-angle
-    grid of sampled radii, starting from the original cylindrical stock, so
-    that a strike's finite axial length can genuinely reach neighbouring
-    stations rather than only the one it is centred on.
+    qualifying strike is replayed in order, against a shared station-by-angle
+    grid, starting from the original cylindrical stock -- via
+    ``network.apply_strike`` (see
+    ``lcaf.simulation.surrogate.inference.SurrogateNetwork.apply_strike``),
+    not a geometric heuristic. The process is inherently stateful: what one
+    strike predicts depends on whatever the previous strikes already left
+    behind, exactly like the paper's own multi-stroke repositioning.
     """
     sections = plan.sections
     station_count = len(sections)
@@ -303,61 +209,16 @@ def material_state(
     stock_radius = float(plan.operations[0]["metadata"]["stock_radius_mm"])
     angles = tuple(2.0 * math.pi * index / radial_segments for index in range(radial_segments))
     station_x = tuple(section.x_model_mm for section in sections)
-    radii_grid: list[list[float]] = [[stock_radius] * radial_segments for _ in range(station_count)]
-    # The target's own boundary is a hard ceiling on bulge growth: displaced
-    # material may spread into unclaimed space, but a strike at one rotation
-    # must never push material, in some other direction it does not itself
-    # cover, past where the target ultimately requires it to end up -- that
-    # is never recovered by a later strike and is exactly the "deformed away
-    # from the target" failure mode this guards against.
-    target_radii_grid = tuple(
-        tuple(
-            _ray_polygon_distance(section.polygon_yz_mm, (math.cos(angle), math.sin(angle)))
-            for angle in angles
-        )
-        for section in sections
-    )
+    points_grid: list[list[Point2]] = [
+        [(stock_radius * math.cos(angle), stock_radius * math.sin(angle)) for angle in angles]
+        for _ in range(station_count)
+    ]
 
     for index, operation in enumerate(plan.operations[: current_index + 1]):
-        metadata = operation["metadata"]
         progress = current_progress if index == current_index else 1.0
-        reduction = float(metadata["radial_reduction_mm"]) * progress
-        support = stock_radius - reduction
-        rotation = math.radians(float(operation["rotation"]))
-        width = float(metadata.get("die_width_mm") or stock_radius)
-        corner_radius = float(metadata.get("die_corner_radius_mm", 0.0) or 0.0)
-        die_length = metadata.get("die_length_mm")
-        # The anvil's own axial reach -- always concrete in current plans
-        # (plan() resolves an unset die_length_mm to the striking segment's
-        # own width), the 1e-6 fallback only guards older/hand-built metadata.
-        axial_half_length = (float(die_length) / 2.0) if die_length is not None else 1e-6
-        upper_die_radius = float(metadata.get("upper_die_radius_mm") or stock_radius)
-        # The striking disc spans its own whole segment by default -- a
-        # strike operation now inherently represents that entire axial
-        # region (its target support is already the region's own
-        # numerically integrated average), not one infinitesimal station.
-        segment_x_start = metadata.get("segment_x_start_mm")
-        segment_x_end = metadata.get("segment_x_end_mm")
-        disc_axial_half_length = (
-            abs(float(segment_x_end) - float(segment_x_start)) / 2.0
-            if segment_x_start is not None and segment_x_end is not None
-            else 1e-6
-        )
-        center_x = station_x[int(metadata["segment_index"])]
-        material = metadata.get("material", "steel")
-        temperature_c = float(operation.get("target_temperature", 0.0))
-        band = resolve_material_band(material, temperature_c)
-        response = formability_response(band.formability)
-        radii_grid = _apply_strike_3d(
-            radii_grid, angles, station_x, center_x, axial_half_length, disc_axial_half_length,
-            rotation, support, stock_radius, width, corner_radius, target_radii_grid, upper_die_radius,
-            response.reach_scale, response.closure_fraction, progress,
-        )
+        points_grid = network.apply_strike(points_grid, station_x, operation["metadata"], stroke_progress=progress)
 
-    return tuple(
-        tuple((radius * math.cos(angle), radius * math.sin(angle)) for radius, angle in zip(row, angles))
-        for row in radii_grid
-    )
+    return tuple(tuple(row) for row in points_grid)
 
 
 def material_cross_section(
@@ -365,6 +226,7 @@ def material_cross_section(
     station_index: int,
     operation_index: int,
     operation_progress: float,
+    network: SurrogateNetwork,
     radial_segments: int = 48,
 ) -> tuple[Point2, ...]:
     """Convenience wrapper returning one station's ring from :func:`material_state`."""
@@ -372,7 +234,7 @@ def material_cross_section(
         return ()
     if not 0 <= station_index < len(plan.sections):
         raise IndexError("station_index is outside the toolpath sections")
-    return material_state(plan, operation_index, operation_progress, radial_segments)[station_index]
+    return material_state(plan, operation_index, operation_progress, network, radial_segments)[station_index]
 
 
 def _ring_area(ring: Sequence[Point2]) -> float:
@@ -392,32 +254,33 @@ def axial_trim_allowance_mm(
     plan: ToolpathPlan,
     operation_index: int,
     operation_progress: float,
+    network: SurrogateNetwork,
     radial_segments: int = 48,
 ) -> float:
     """How much extra length the free (+X) end currently holds to keep the
     billet's total volume exactly conserved.
 
-    Forging never deletes or creates material. ``material_state``'s own
-    local bulge (see ``_apply_strike_3d``) only redistributes material a
-    couple of footprint dimensions from wherever a die actually struck, and
-    is bounded so it never overshoots the target's own boundary there -- by
-    itself, it does not account for all of the cross-sectional area a
-    strike removes. Whatever it does not locally reabsorb must reappear
-    somewhere: real open-die forging pushes it out the free end (the
-    clamped end cannot move), extending the billet's total length beyond
-    the target's own -- material a saw trims off once forging is complete.
-    This function returns that length directly from a volume balance --
-    current total volume (trapezoidally integrated over every station's
-    actual current ring) versus the original stock cylinder's volume --
-    rather than solving for it, so it is exactly conserving by construction
-    and continuous in ``operation_progress`` (the same continuous
-    ``material_state`` this integrates already is).
+    Forging never deletes or creates material. The surrogate's own local
+    displacement prediction at each struck station does not, by itself,
+    balance the cross-sectional area removed there against the rest of the
+    billet -- real open-die forging pushes whatever is not locally
+    reabsorbed out the free end (the clamped end cannot move), extending the
+    billet's total length beyond the target's own (material a saw trims off
+    once forging is complete). This function returns that length directly
+    from a volume balance -- current total volume (trapezoidally integrated
+    over every station's actual current ring, from ``material_state``)
+    versus the original stock cylinder's volume -- rather than modelling
+    axial flow explicitly. This is also where the local displacement
+    kernel's un-applied axial component (see
+    ``lcaf.simulation.surrogate.geometry.LocalFrame.displacement_to_global``)
+    is compensated for in aggregate, rather than per station -- see
+    ``docs/surrogate_deformation_model.md``'s scope section.
 
     Returns 0.0 once the current state already holds at least as much
     volume as the original stock (which can happen briefly ahead of the
-    local bulge's own gradual catch-up, or once ``stock_radius_mm`` and the
-    mesh's own length already happen to match the target's own volume with
-    nothing left over -- see ``recommended_stock_length_mm``).
+    local prediction's own gradual catch-up, or once ``stock_radius_mm`` and
+    the mesh's own length already happen to match the target's own volume
+    with nothing left over -- see ``recommended_stock_length_mm``).
     """
     sections = plan.sections
     if not sections or not plan.operations:
@@ -444,7 +307,7 @@ def axial_trim_allowance_mm(
     pristine_ring = tuple((stock_radius_mm * math.cos(angle), stock_radius_mm * math.sin(angle)) for angle in angles)
     original_stock_volume_mm3 = _ring_area(pristine_ring) * span_mm
 
-    state = material_state(plan, operation_index, operation_progress, radial_segments)
+    state = material_state(plan, operation_index, operation_progress, network, radial_segments)
     current_volume_mm3 = sum(
         0.5 * (_ring_area(state[index]) + _ring_area(state[index + 1]))
         * (station_x[index + 1] - station_x[index])
@@ -464,24 +327,25 @@ def find_sufficient_cycles(
     mesh: TriangleMesh,
     settings: SliceSettings,
     limits: MachineLimits,
+    network: SurrogateNetwork,
     max_cycles: int = 20,
     tolerance_mm: float = 0.5,
 ) -> ToolpathPlan:
-    """Grow ``settings.cycles`` until the simulated geometry matches target.
+    """Grow ``settings.cycles`` until the surrogate-predicted geometry matches target.
 
-    Every operation just replays, in order, against one running material
-    state, so a later cycle automatically trues up whatever an earlier
-    (rougher) cycle left rough or overshot -- no cycle-aware engine logic is
-    needed beyond simply planning with more cycles and re-checking. This
-    tries ``cycles = 1, 2, 3, ...`` (ignoring whatever ``settings.cycles``
-    was already set to), replans each time, and compares the fully struck
-    geometry against each segment's own target ring the same way
-    ``test_final_deformed_geometry_matches_the_target_exactly`` already
-    does, stopping as soon as the worst vertex deviation anywhere is within
-    ``tolerance_mm``. If it never converges by ``max_cycles`` (a too-small
-    die footprint or too few strikes per segment can make some directions
-    structurally unreachable), the ``max_cycles`` attempt is returned with a
-    warning appended rather than looping forever.
+    Tries ``cycles = 1, 2, 3, ...`` (ignoring whatever ``settings.cycles``
+    was already set to), replans each time, and compares the surrogate's
+    predicted struck geometry against each segment's own target ring,
+    stopping as soon as the worst vertex deviation anywhere is within
+    ``tolerance_mm``. Unlike the old geometric heuristic (which was
+    mathematically guaranteed to converge given enough cycles), a trained
+    network predicts what a real strike actually does -- it may never reach
+    an arbitrary target within ``max_cycles``, which is not a bug in this
+    function so much as an honest signal that the plan itself may be
+    physically unrealistic for the die/material combination the checkpoint
+    was trained on. If it never converges by ``max_cycles``, the
+    ``max_cycles`` attempt is returned with a warning appended rather than
+    looping forever.
     """
     plan: ToolpathPlan | None = None
     for cycles in range(1, max(1, max_cycles) + 1):
@@ -490,12 +354,16 @@ def find_sufficient_cycles(
         if not plan.operations:
             return plan
         last_operation = len(plan.operations) - 1
+        # One shared material_state call for every segment's check, not one
+        # per segment (material_cross_section on its own would replay the
+        # whole operation history from scratch for each segment) -- cheap for
+        # the old arithmetic heuristic, but each replayed strike is now a
+        # network evaluation, so this redundancy is worth avoiding.
+        final_state = material_state(plan, last_operation, 1.0, network, radial_segments=48)
         worst_deviation_mm = 0.0
         for segment_index, segment in enumerate(plan.sections):
             target_ring = radial_resample(segment.polygon_yz_mm, radial_segments=48)
-            final_ring = material_cross_section(
-                plan, segment_index, last_operation, 1.0, radial_segments=48
-            )
+            final_ring = final_state[segment_index]
             for (target_y, target_z), (final_y, final_z) in zip(target_ring, final_ring):
                 worst_deviation_mm = max(
                     worst_deviation_mm, math.hypot(final_y - target_y, final_z - target_z)
@@ -506,332 +374,13 @@ def find_sufficient_cycles(
     assert plan is not None
     warning = (
         f"'Complete necessary cycles' reached max_cycles={max_cycles} without the "
-        f"simulated geometry converging within {tolerance_mm:.2f} mm of the target -- "
-        "inspect the preview before trusting this plan; a too-small die footprint or "
-        "too few strikes per segment can make some directions structurally unreachable "
-        "no matter how many cycles are run."
+        f"surrogate-predicted geometry converging within {tolerance_mm:.2f} mm of the "
+        "target -- inspect the preview before trusting this plan; this can mean the plan "
+        "asks for more reduction than this die/material combination can achieve, or simply "
+        "that the checkpoint's own training data does not cover this strike well (see "
+        "lcaf.simulation.surrogate.process_params.ProcessParameters.within_trained_domain)."
     )
     return dataclasses.replace(plan, warnings=plan.warnings + (warning,))
-
-
-def _apply_strike_3d(
-    radii_grid: list[list[float]],
-    angles: Sequence[float],
-    station_x: Sequence[float],
-    center_x: float,
-    axial_half_length: float,
-    disc_axial_half_length: float,
-    rotation_rad: float,
-    support_mm: float,
-    stock_radius_mm: float,
-    width_mm: float,
-    corner_radius_mm: float,
-    target_radii_grid: Sequence[Sequence[float]],
-    upper_die_radius_mm: float,
-    reach_scale: float,
-    closure_fraction: float,
-    stroke_progress: float = 1.0,
-) -> list[list[float]]:
-    """Clip the whole station-by-angle grid by one die strike.
-
-    ``stroke_progress`` (0..1) scales the bulge relaxation only -- at
-    ``stroke_progress=0`` (the die has not yet moved this operation) the
-    relaxation must contribute nothing, since there is nothing yet for
-    material to be displaced by; it ramps up to the full
-    ``reach_scale``/``closure_fraction``-scaled relaxation at
-    ``stroke_progress=1``. The rigid clip is unaffected by this parameter --
-    it already depends on ``support_mm``, which the caller has already
-    scaled by the same stroke progress.
-
-    Two rigid, finite footprints act on every strike:
-
-    - The **striking die** (+normal side) is a genuine flat-faced circular
-      disc of radius ``upper_die_radius_mm``: at axial offset ``a`` from the
-      strike its tangential half-width is ``sqrt(max(0, R**2 - a**2))``, the
-      same lens-shaped taper a real round punch has. That taper is
-      additionally cut off at ``disc_axial_half_length`` (+ margin) along X
-      -- by default the *whole width of the segment this strike targets*,
-      since a strike's target support is itself the numerical average of
-      the target across that whole segment, not one point -- so a disc
-      wider than its own segment is simply truncated by the segment
-      boundary, the way a real punch that overhangs its intended region
-      would only ever contact within that region. ``disc_axial_half_length``
-      is independent of ``die_length_mm`` (below, the anvil's own axial
-      reach) -- widening the anvil specifically must never change how far
-      the striking disc reaches.
-    - The **anvil** (-normal side) never moves; within its rectangular
-      footprint (``width_mm`` tangentially, ``axial_half_length`` --
-      from ``die_length_mm`` -- axially, blended at its tangential edges by
-      ``corner_radius_mm``) it is an impenetrable displacement boundary
-      holding material at ``stock_radius_mm`` (it never reduces anything,
-      only prevents bulging past the original surface).
-
-    Material either footprint displaces is not deleted: it relaxes smoothly,
-    immediately adjacent to it -- both axially and tangentially -- toward
-    the target's own known boundary in that exact direction, via the bounded
-    relaxation described in the module docstring, fading to zero within a
-    margin of the footprint's own edge. That relaxation never pushes
-    material past the target's own boundary in that exact direction (it is
-    a bounded blend toward it, never an overshoot), since a rotation whose
-    strike does not itself cover that direction will never bring an
-    overshoot there back down again. The two footprints can never collide
-    with each other -- the striking side only ever touches rays with
-    ``sin(theta + rotation_rad) > 0``, the anvil side only rays with
-    ``sin(theta + rotation_rad) < 0``.
-
-    ``reach_scale`` and ``closure_fraction`` (see
-    ``lcaf.toolpathing.material.formability_response``) do not touch either
-    footprint's *rigid* shape or reach -- only the bulge margins (via
-    ``_footprint_bias``, confinement-weighted by each footprint's own
-    axial/tangential aspect ratio) and how much of the remaining gap to
-    target closes this strike. Both default to values that reduce exactly
-    to the previous isotropic behaviour (``reach_scale=1``), and
-    ``closure_fraction=1`` collapses the relaxation to "snap fully to
-    target wherever touched" -- never used in practice since no material
-    band reaches a formability of exactly 1.
-    """
-    station_count = len(radii_grid)
-    segment_count = len(angles)
-    new_grid = [list(row) for row in radii_grid]
-
-    # Bulge only ever ramps up with how far this operation's own stroke has
-    # actually progressed -- at stroke_progress=0 the die has not moved yet,
-    # so there is nothing for material to have been displaced by.
-    effective_closure_fraction = closure_fraction * max(0.0, min(stroke_progress, 1.0))
-
-    # The raised-cosine bulge margins below must stay wide enough for the
-    # angular/axial sampling grid to actually resolve them as a smooth taper:
-    # an aspect-ratio bias and/or a low reach_scale can otherwise shrink a
-    # margin to a fraction of a millimetre, at which point only one or two
-    # samples fall inside it and the "smooth" cosine collapses into a hard
-    # step between neighbouring rays -- a discontinuous, "triangulated" jump
-    # in the rendered cross-section rather than a bulge.
-    margin_floor_mm = max(stock_radius_mm * _MIN_MARGIN_FRACTION, 1e-6)
-
-    # Material flows toward the free (unclamped) end of the billet, not
-    # toward the clamp: a strike's own bulge margin reaches only "a couple
-    # footprint dimensions" backward (toward -X, the clamp) but reaches much
-    # further forward (toward +X, the free end), decaying smoothly with
-    # distance -- so a strike anywhere in the bar visibly, gradually nudges
-    # every station between it and the free end, not just its immediate
-    # neighbours, the same way real open-die forging pushes material
-    # progressively toward the unclamped end rather than the displaced
-    # volume only ever showing up as a lump at the very tip. Capped at the
-    # actual remaining room to the free end so the taper's own far edge
-    # lines up with (rather than needlessly overshooting past) it.
-    free_end_x = max(station_x) if station_x else center_x
-    forward_room_mm = max(free_end_x - center_x, margin_floor_mm)
-
-    def forward_margin_mm(backward_margin_mm: float) -> float:
-        return min(backward_margin_mm * _FORWARD_REACH_MULTIPLIER, forward_room_mm)
-
-    def margin_for(signed_offset: float, backward_margin_mm: float, forward_margin: float) -> float:
-        return forward_margin if signed_offset >= 0.0 else backward_margin_mm
-
-    half_width_anvil = width_mm / 2.0
-    anvil_axial_bias, anvil_tangential_bias = _footprint_bias(2.0 * axial_half_length, width_mm)
-    influence_margin_anvil_mm = max(2.0 * half_width_anvil * (2.0 * anvil_tangential_bias) * reach_scale, margin_floor_mm)
-    axial_margin_backward_mm = max(2.0 * axial_half_length * (2.0 * anvil_axial_bias) * reach_scale, margin_floor_mm)
-    axial_margin_forward_mm = forward_margin_mm(axial_margin_backward_mm)
-    disc_axial_bias, disc_tangential_bias = _footprint_bias(2.0 * disc_axial_half_length, 2.0 * upper_die_radius_mm)
-    disc_axial_margin_backward_mm = max(2.0 * disc_axial_half_length * (2.0 * disc_axial_bias) * reach_scale, margin_floor_mm)
-    disc_axial_margin_forward_mm = forward_margin_mm(disc_axial_margin_backward_mm)
-
-    def disc_half_width_at(axial_offset: float) -> float:
-        return math.sqrt(max(0.0, upper_die_radius_mm**2 - axial_offset**2))
-
-    in_footprint = [[False] * segment_count for _ in range(station_count)]
-    touched: set[int] = set()
-
-    # --- Striking die: a flat-faced circular disc, its lens-shaped taper
-    # additionally cut off at disc_axial_half_length (+ margin) from the
-    # segment it targets. The rigid reach itself (disc_axial_half_length)
-    # stays symmetric and unchanged -- only the bulge margin beyond it is
-    # forward-biased.
-    for station in range(station_count):
-        signed_offset = station_x[station] - center_x
-        axial_offset = abs(signed_offset)
-        margin = margin_for(signed_offset, disc_axial_margin_backward_mm, disc_axial_margin_forward_mm)
-        if axial_offset > disc_axial_half_length + margin + 1e-9:
-            continue  # far outside this strike's zone of influence -- untouched.
-        touched.add(station)
-        if axial_offset > disc_axial_half_length + 1e-9:
-            continue  # in the bulge margin but not rigidly held at this station.
-        half_width = disc_half_width_at(axial_offset)
-        if half_width <= 0.0:
-            continue  # the disc's own circular taper does not reach this far.
-        row = new_grid[station]
-        footprint_row = in_footprint[station]
-        for index, theta in enumerate(angles):
-            delta = theta + rotation_rad
-            alignment = math.sin(delta)
-            if alignment <= 1e-9:
-                continue  # this ray is on the anvil's side (or tangent).
-            clipped = _die_clip_radius(row[index], alignment, math.cos(delta), support_mm, half_width, 0.0)
-            if clipped is not None:
-                row[index] = clipped
-            if abs(row[index] * math.cos(delta)) <= half_width + 1e-9:
-                footprint_row[index] = True
-
-    # --- Anvil: rectangular footprint, reaching axial_half_length (+
-    # forward-biased margin) from die_length_mm.
-    for station in range(station_count):
-        signed_offset = station_x[station] - center_x
-        axial_offset = abs(signed_offset)
-        margin = margin_for(signed_offset, axial_margin_backward_mm, axial_margin_forward_mm)
-        if axial_offset > axial_half_length + margin + 1e-9:
-            continue  # far outside this strike's zone of influence -- untouched.
-        touched.add(station)
-        if axial_offset > axial_half_length + 1e-9:
-            continue  # in the bulge margin but not rigidly held at this station.
-        row = new_grid[station]
-        footprint_row = in_footprint[station]
-        for index, theta in enumerate(angles):
-            delta = theta + rotation_rad
-            alignment = math.sin(delta)
-            if alignment >= -1e-9:
-                continue  # this ray is on the striking side (or tangent); the anvil is not there.
-            clipped = _die_clip_radius(row[index], -alignment, math.cos(delta), stock_radius_mm, half_width_anvil, corner_radius_mm)
-            if clipped is not None:
-                row[index] = clipped
-            if abs(row[index] * math.cos(delta)) <= half_width_anvil + 1e-9:
-                footprint_row[index] = True
-
-    touched_stations = sorted(touched)
-    if not touched_stations:
-        return new_grid
-
-    # Disc bulge: relax each untouched ray on the striking side smoothly
-    # toward its own known target, weighted by an axial x tangential
-    # raised-cosine fade -- applied immediately and directly (no aggregate
-    # volume solve), since this pass and the anvil pass below can never
-    # touch the same ray (they occupy opposite hemispheres of sin(delta)).
-    for station in touched_stations:
-        signed_offset = station_x[station] - center_x
-        axial_offset = abs(signed_offset)
-        margin = margin_for(signed_offset, disc_axial_margin_backward_mm, disc_axial_margin_forward_mm)
-        axial_beyond = max(0.0, axial_offset - disc_axial_half_length)
-        if axial_beyond >= margin:
-            continue
-        axial_factor = (
-            1.0 if axial_beyond <= 0.0
-            else 0.5 * (1.0 + math.cos(math.pi * axial_beyond / margin))
-        )
-        half_width = disc_half_width_at(min(axial_offset, disc_axial_half_length))
-        influence_margin_disc_mm = max(2.0 * half_width * (2.0 * disc_tangential_bias) * reach_scale, margin_floor_mm)
-        footprint_row = in_footprint[station]
-        row = new_grid[station]
-        target_row = target_radii_grid[station]
-        for index, theta in enumerate(angles):
-            if footprint_row[index]:
-                continue
-            delta = theta + rotation_rad
-            if math.sin(delta) <= 1e-9:
-                continue  # only the striking die's own hemisphere bulges here.
-            tangential = abs(row[index] * math.cos(delta))
-            tangential_beyond = tangential - half_width
-            if tangential_beyond <= 0.0:
-                tangential_factor = 1.0
-            elif tangential_beyond < influence_margin_disc_mm:
-                tangential_factor = 0.5 * (1.0 + math.cos(math.pi * tangential_beyond / influence_margin_disc_mm))
-            else:
-                continue
-            weight = axial_factor * tangential_factor
-            if weight > 0.0:
-                current = row[index]
-                row[index] = current + weight * effective_closure_fraction * (target_row[index] - current)
-
-    # Anvil bulge: the same bounded relaxation, on the anvil's hemisphere.
-    for station in touched_stations:
-        signed_offset = station_x[station] - center_x
-        axial_offset = abs(signed_offset)
-        margin = margin_for(signed_offset, axial_margin_backward_mm, axial_margin_forward_mm)
-        axial_beyond = max(0.0, axial_offset - axial_half_length)
-        if axial_beyond >= margin:
-            continue
-        axial_factor = (
-            1.0 if axial_beyond <= 0.0
-            else 0.5 * (1.0 + math.cos(math.pi * axial_beyond / margin))
-        )
-        footprint_row = in_footprint[station]
-        row = new_grid[station]
-        target_row = target_radii_grid[station]
-        for index, theta in enumerate(angles):
-            if footprint_row[index]:
-                continue
-            delta = theta + rotation_rad
-            if math.sin(delta) >= -1e-9:
-                continue  # the striking die (or the tangent seam) never bulges -- only the anvil side can.
-            tangential = abs(row[index] * math.cos(delta))
-            tangential_beyond = tangential - half_width_anvil
-            if tangential_beyond <= 0.0:
-                tangential_factor = 1.0
-            elif tangential_beyond < influence_margin_anvil_mm:
-                tangential_factor = 0.5 * (1.0 + math.cos(math.pi * tangential_beyond / influence_margin_anvil_mm))
-            else:
-                continue
-            weight = axial_factor * tangential_factor
-            if weight > 0.0:
-                current = row[index]
-                row[index] = current + weight * effective_closure_fraction * (target_row[index] - current)
-
-    return new_grid
-
-
-def _footprint_bias(axial_extent_mm: float, tangential_extent_mm: float) -> tuple[float, float]:
-    """Confinement-weighted axial/tangential bias from one footprint's own aspect ratio.
-
-    Material spreads preferentially toward whichever direction the die
-    itself is smaller in -- the direction it confines least -- rather than
-    with the same isotropic reach regardless of die shape: a long, narrow
-    footprint is biased toward tangential spread, a short, wide one toward
-    axial spread. Returns ``(axial_bias, tangential_bias)``, each in (0, 1)
-    and summing to 1; a square footprint (equal extents) returns
-    ``(0.5, 0.5)`` which, multiplied by 2 where it is used, reduces exactly
-    to the previous isotropic margins.
-    """
-    axial_extent_mm = max(axial_extent_mm, 1e-9)
-    tangential_extent_mm = max(tangential_extent_mm, 1e-9)
-    total = axial_extent_mm + tangential_extent_mm
-    return tangential_extent_mm / total, axial_extent_mm / total
-
-
-def _die_clip_radius(
-    old_radius: float,
-    alignment: float,
-    tangent_coefficient: float,
-    support_mm: float,
-    half_width_mm: float,
-    corner_radius_mm: float,
-) -> float | None:
-    """Find the smallest radius along one ray where it first meets the die surface.
-
-    The ray is parameterised by ``r``; its normal-direction coordinate is
-    ``r * alignment`` and its tangential coordinate is ``r * tangent_coefficient``.
-    Returns ``None`` if the ray never exceeds the die surface before ``old_radius``
-    (already clear, or it leaves the footprint before that would happen).
-    """
-
-    def violation(radius: float) -> float:
-        tangential = radius * tangent_coefficient
-        cap = die_cap(tangential, support_mm, half_width_mm, corner_radius_mm)
-        if cap is None:
-            return -1.0
-        return radius * alignment - cap
-
-    if violation(old_radius) <= 0.0:
-        return None
-    if violation(0.0) > 0.0:
-        return 0.0
-
-    low, high = 0.0, old_radius
-    for _ in range(40):
-        mid = (low + high) / 2.0
-        if violation(mid) > 0.0:
-            high = mid
-        else:
-            low = mid
-    return high
 
 
 def radial_resample(polygon: Sequence[Point2], radial_segments: int = 48) -> tuple[Point2, ...]:
